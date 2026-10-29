@@ -127,3 +127,10 @@ up to date at the end of every milestone.
   epochs, guards, bounds, deadband, freshness, /data), all killed by a test.
 - Confirmation: the reads right after a change are repeated (300 ms apart)
   until the answer time, given up at once for a stop or a command waiting.
+
+## Next patch
+
+- r4 m17: no test checks that a mode answered by a 2xx other than 200 counts as sent (the mutant moving the
+  lower bound of `redirected` from 300 to 200 survives). One-line test.
+- r4 m18: CLAUDE.md still says "a new session only after a 4xx of the queue"; since r3 a 4xx of Connect,
+  RequestData or Publish also opens one.
