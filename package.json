@@ -1,6 +1,6 @@
 {
   "name": "gladys-lennox-s30",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Lennox S30, E30 and M30 thermostats over their local API (zones, temperature, humidity, setpoints, modes, fan, alerts; Off always available, other commands optional). Unofficial, not affiliated with Lennox.",
   "type": "module",

@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-29
+
 ### Added
 
 - First version: a Lennox S30, E30 or M30 read over its local API (HTTPS,
@@ -24,4 +26,5 @@ the notes of the version's GitHub Release.
   when the zone still runs; a start at the thermostat after it is never
   fought; it follows the thermostat to a new address.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-lennox-s30/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-lennox-s30/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-lennox-s30/releases/tag/v0.1.1
