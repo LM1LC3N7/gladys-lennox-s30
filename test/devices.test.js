@@ -1,250 +1,245 @@
+// -----------------------------------------------------------------------------
+// Devices, states, setpoints and configuration (pure parts).
+// -----------------------------------------------------------------------------
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import {
-  DEVICE_FEATURE_CATEGORIES,
-  DEVICE_FEATURE_TYPES,
-  DEVICE_POLL_FREQUENCIES,
-  DEVICE_TRANSPORTS,
+  DEVICE_FEATURE_CATEGORIES as C,
+  DEVICE_FEATURE_TYPES as TYPES,
 } from '@gladysassistant/integration-sdk';
 import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import {
-  DEVICE_BLUEPRINTS,
-  buildDiscoveredDevices,
-  buildTransportEntries,
-  createPoller,
-  findBlueprintByDevice,
-  identifyDevice,
-} from '../src/devices/index.js';
-import { simulateLanSession } from '../src/devices/plug.js';
-import { normalizeConfig } from '../src/config.js';
+  buildSystemDevice,
+  buildZoneDevice,
+  commandValue,
+  parseDeviceId,
+  parseFeatureId,
+  setpointIn,
+  temperatureIn,
+} from '../src/devices.js';
+import { applyMessage, emptyModel } from '../src/lennox/protocol.js';
+import { limitsOf, pairOf, planSetpoint, rangeOf, toC } from '../src/setpoints.js';
+import { normalizeConfig, parseAddress } from '../src/config.js';
+import { FEATURES as F, SETPOINT_BOUNDS } from '../src/constants.js';
 
-const gladys = createFakeGladys();
-const config = normalizeConfig();
-
-test('every blueprint exposes the required shape', () => {
-  for (const bp of DEVICE_BLUEPRINTS) {
-    assert.equal(typeof bp.key, 'string', 'key must be a string');
-    assert.equal(typeof bp.deviceExternalId, 'function', 'deviceExternalId must be a function');
-    assert.equal(typeof bp.buildDevice, 'function', 'buildDevice must be a function');
-  }
+const field = (value) => ({ value, seq: 1, at: 0 });
+const zoneOf = (config = {}, period = {}) => ({
+  id: 0,
+  config: Object.fromEntries(
+    Object.entries({
+      name: 'Main',
+      minHsp: 40,
+      maxHsp: 90,
+      minHspC: 4.5,
+      maxHspC: 32,
+      minCsp: 60,
+      maxCsp: 99,
+      minCspC: 15.5,
+      maxCspC: 37,
+      ...config,
+    }).map(([k, v]) => [k, field(v)]),
+  ),
+  status: {},
+  period: Object.fromEntries(
+    Object.entries({ hsp: 68, hspC: 20, csp: 77, cspC: 25, ...period }).map(([k, v]) => [
+      k,
+      field(v),
+    ]),
+  ),
 });
 
-test('buildDiscoveredDevices returns one payload per blueprint', () => {
-  const devices = buildDiscoveredDevices(gladys, config);
-  assert.equal(devices.length, DEVICE_BLUEPRINTS.length);
-  for (const device of devices) {
-    assert.equal(typeof device.name, 'string');
-    assert.ok(device.external_id, 'each device has an external_id');
-    assert.ok(Array.isArray(device.features) && device.features.length > 0);
-  }
-});
-
-test('Gladys accepts the discovery payload', async () => {
-  // The SDK fake checks the payload like the host API does: external_id
-  // prefix, known category/type/unit, poll_frequency... A refusal is a 400
-  // for the WHOLE list, so no device would show up in the Discovery tab.
-  const fresh = createFakeGladys();
-  await fresh.publishDiscoveredDevices(buildDiscoveredDevices(fresh, config));
-  assert.equal(fresh.fake.discoveredDevices.length, DEVICE_BLUEPRINTS.length);
-});
-
-test('Gladys polls exactly the devices that implement onPoll', () => {
-  // A device carrying a `poll_frequency` is polled: a recent core sets
-  // `should_poll: true` on it by itself, an older one needs it explicit, and
-  // an explicit `should_poll: false` is never polled on either.
-  const frequencies = Object.values(DEVICE_POLL_FREQUENCIES);
-  for (const bp of DEVICE_BLUEPRINTS) {
-    const device = bp.buildDevice(gladys, config);
-    if (typeof bp.onPoll === 'function') {
-      assert.ok(frequencies.includes(device.poll_frequency), `${bp.key}: invalid poll_frequency`);
-      assert.equal(
-        device.should_poll,
-        true,
-        `${bp.key}: the older cores poll only with should_poll`,
-      );
-    } else {
-      assert.ok(
-        device.poll_frequency === undefined || device.should_poll === false,
-        `${bp.key}: polled for nothing`,
-      );
+test('°F and °C: exact conversions, both values within both limits after conversion', () => {
+  assert.deepEqual(pairOf(21.3, 'C'), { C: 21.5, F: 71 });
+  assert.deepEqual(pairOf(70, 'F'), { F: 70, C: 21 });
+  assert.deepEqual(pairOf(71, 'F'), { F: 71, C: 21.5 });
+  assert.equal(temperatureIn('C', 68.875), 20.5);
+  assert.equal(temperatureIn('C', 71.625), 22);
+  assert.equal(temperatureIn('F', undefined, 20), 68);
+  assert.equal(setpointIn('C', 68, 20), 20);
+  assert.equal(setpointIn('F', 68, 20), 68);
+  // The top of a zone in °F (86) gives 30 °C, never 30.5 (= 86.9 °F).
+  const zone = zoneOf({ maxHsp: 86, maxHspC: 30.5 });
+  assert.deepEqual(rangeOf(limitsOf(zone, 'heat'), 'C'), { min: 4.5, max: 30 });
+  assert.deepEqual(rangeOf(limitsOf(zone, 'heat'), 'F'), { min: 40, max: 86 });
+  // Our own ceiling holds whatever the zone says.
+  const wide = zoneOf({ maxHsp: 120, maxHspC: 49 });
+  assert.equal(rangeOf(limitsOf(wide, 'heat'), 'F').max, SETPOINT_BOUNDS.heat.F.max);
+  assert.equal(planSetpoint(wide, 'heat', 95, 'F').error, 'range');
+  // Every value offered converts within the limits.
+  for (const unit of ['C', 'F']) {
+    const r = rangeOf(limitsOf(zone, 'heat'), unit);
+    for (let x = r.min; x <= r.max; x += unit === 'C' ? 0.5 : 1) {
+      const p = pairOf(x, unit);
+      assert.ok(p.F <= 86 && p.C <= 30.5 && toC(p.F) <= 30.6, `${x} ${unit}`);
     }
   }
 });
 
-test('the poller reads a device at the refresh interval of the config', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
-  const fresh = createFakeGladys();
-  const pollDevice = createPoller();
-  const plug = {
-    external_id: DEVICE_BLUEPRINTS.find((bp) => bp.key === 'plug').deviceExternalId(fresh),
-  };
-  const everyFiveMinutes = normalizeConfig({ poll_frequency: 300 });
-
-  assert.equal(await pollDevice(fresh, plug, everyFiveMinutes), true, 'the first poll reads');
-  for (let minute = 1; minute < 5; minute += 1) {
-    t.mock.timers.tick(DEVICE_POLL_FREQUENCIES.EVERY_MINUTES);
-    assert.equal(
-      await pollDevice(fresh, plug, everyFiveMinutes),
-      false,
-      `skipped at ${minute} min`,
-    );
-  }
-  // Gladys' tick may land a little early: the read is still due.
-  t.mock.timers.tick(DEVICE_POLL_FREQUENCIES.EVERY_MINUTES - 50);
-  assert.equal(await pollDevice(fresh, plug, everyFiveMinutes), true, 'read again at 5 min');
-});
-
-test('the poller retries a failed read at the next poll', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
-  const pollDevice = createPoller();
-  const station = {
-    external_id: DEVICE_BLUEPRINTS.find((bp) => bp.key === 'weather-station').deviceExternalId(
-      gladys,
-    ),
-  };
-  t.mock.method(globalThis, 'fetch', async () => {
-    throw new Error('network down');
+test('setpoints: the other one moves the safe way, within its limits, or the command is refused', () => {
+  assert.deepEqual(planSetpoint(zoneOf(), 'heat', 76, 'F').fields, {
+    hsp: 76,
+    hspC: 24.5,
+    csp: 79,
+    cspC: 26,
   });
-  await assert.rejects(pollDevice(gladys, station, config), /network down/);
-
-  globalThis.fetch.mock.mockImplementation(async () => ({
-    ok: true,
-    json: async () => ({ current: { temperature_2m: 21.4, relative_humidity_2m: 55 } }),
-  }));
-  t.mock.timers.tick(DEVICE_POLL_FREQUENCIES.EVERY_MINUTES);
-  assert.equal(await pollDevice(gladys, station, config), true, 'not delayed by the failure');
-  assert.equal(gladys.fake.lastState(`${station.external_id}:temperature`), 21.4);
-});
-
-test('the poller ignores a device that has nothing to poll', async () => {
-  const pollDevice = createPoller();
-  const switchId = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'switch').deviceExternalId(gladys);
-  assert.equal(await pollDevice(gladys, { external_id: switchId }, config), false);
-  assert.equal(await pollDevice(gladys, { external_id: 'does-not-exist' }, config), false);
-});
-
-test('an idle plug publishes its 0 W once, then only as a heartbeat', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
-  const fresh = createFakeGladys();
-  const plug = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'plug');
-  await plug.onPoll(fresh, config);
-  await plug.onPoll(fresh, config);
-  assert.equal(fresh.fake.states.length, 1, 'an unchanged value is not sent again');
-  t.mock.timers.tick(30 * 60 * 1000);
-  await plug.onPoll(fresh, config);
-  assert.equal(fresh.fake.states.length, 2, 're-sent after 30 minutes');
-});
-
-test('device external_ids are unique across the catalog', () => {
-  const devices = buildDiscoveredDevices(gladys, config);
-  const ids = devices.map((d) => d.external_id);
-  assert.equal(new Set(ids).size, ids.length, 'no two devices may share an external_id');
-});
-
-test('findBlueprintByDevice routes an external_id back to its owner blueprint', () => {
-  for (const bp of DEVICE_BLUEPRINTS) {
-    const external_id = bp.deviceExternalId(gladys);
-    const found = findBlueprintByDevice(gladys, { external_id });
-    assert.equal(found, bp);
-  }
-});
-
-test('findBlueprintByDevice returns undefined for an unknown device', () => {
-  const found = findBlueprintByDevice(gladys, { external_id: 'does-not-exist' });
-  assert.equal(found, undefined);
-});
-
-test('manifest action keys are unique across blueprints', () => {
-  const keys = DEVICE_BLUEPRINTS.flatMap((bp) => Object.keys(bp.actions ?? {}));
-  assert.equal(new Set(keys).size, keys.length, 'no two blueprints may register the same action');
-});
-
-test('the camera declares a camera/image feature', () => {
-  const cameraBlueprint = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'camera');
-  const device = cameraBlueprint.buildDevice(gladys, config);
-  const imageFeature = device.features.find((f) => f.category === DEVICE_FEATURE_CATEGORIES.CAMERA);
-  assert.ok(imageFeature, 'the camera must carry a camera feature');
-  assert.equal(imageFeature.type, DEVICE_FEATURE_TYPES.CAMERA.IMAGE);
-  assert.equal(imageFeature.read_only, true);
-});
-
-test('onGetImage resolves a base64 JPEG under the 150 KB limit', async () => {
-  const cameraBlueprint = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'camera');
-  const image = await cameraBlueprint.onGetImage(gladys, {
-    device: { external_id: cameraBlueprint.deviceExternalId(gladys) },
-    config,
+  assert.deepEqual(planSetpoint(zoneOf(), 'cool', 66, 'F').fields, {
+    hsp: 63,
+    hspC: 17.5,
+    csp: 66,
+    cspC: 19,
   });
-  assert.match(image, /^image\/jpg;base64,/);
-  assert.ok(image.length <= 150 * 1024, 'the image must stay under 150 KB');
-});
-
-test('buildTransportEntries reports one valid entry per dual-channel device', () => {
-  const entries = buildTransportEntries(gladys, config);
-  assert.ok(entries.length > 0, 'the demo plug reports its transport');
-  const validValues = Object.values(DEVICE_TRANSPORTS);
-  for (const entry of entries) {
-    assert.ok(entry.external_id, 'each entry targets a device external_id');
-    assert.ok(validValues.includes(entry.transport), `invalid transport: ${entry.transport}`);
-  }
-});
-
-test('the demo plug honors the GLADYS_PREFER_LOCAL preference', () => {
-  const local = buildTransportEntries(gladys, normalizeConfig({ GLADYS_PREFER_LOCAL: true }));
-  const cloud = buildTransportEntries(gladys, normalizeConfig({ GLADYS_PREFER_LOCAL: false }));
-  const plugId = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'plug').deviceExternalId(gladys);
-  assert.equal(local.find((e) => e.external_id === plugId).transport, DEVICE_TRANSPORTS.LOCAL);
-  assert.equal(cloud.find((e) => e.external_id === plugId).transport, DEVICE_TRANSPORTS.CLOUD);
-});
-
-test('nominal transport entries never carry a leftover degraded flag', () => {
-  const entries = buildTransportEntries(gladys, config);
-  for (const entry of entries) {
-    assert.equal(entry.degraded, undefined, 'nominal entries must clear the degraded state');
-  }
-});
-
-test('the plug reports a degraded cloud fallback when the LAN session is refused', () => {
-  const plugId = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'plug').deviceExternalId(gladys);
-  simulateLanSession(false);
-  try {
-    const entries = buildTransportEntries(gladys, normalizeConfig({ GLADYS_PREFER_LOCAL: true }));
-    const entry = entries.find((e) => e.external_id === plugId);
-    assert.equal(entry.transport, DEVICE_TRANSPORTS.CLOUD, 'falls back to cloud');
-    assert.equal(entry.degraded, true, 'the fallback is flagged degraded');
-    assert.ok(entry.message.en, 'the reason carries at least the mandatory `en` text');
-    assert.ok(entry.message.en.length <= 200, 'tooltip messages are capped at 200 characters');
-  } finally {
-    simulateLanSession(true);
-  }
-});
-
-test('identifyDevice signals a device that implements identify', async () => {
-  const lightId = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'light').deviceExternalId(gladys);
-  const message = await identifyDevice(gladys, lightId, config);
-  assert.match(message.en, /signalling/);
-  assert.ok(message.fr, 'the message is multi-language');
-});
-
-test('identifyDevice explains when the device has no way to signal itself', async () => {
-  const weatherId = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'weather-station').deviceExternalId(
-    gladys,
+  assert.equal(
+    planSetpoint(zoneOf({ minHsp: 64, minHspC: 18 }), 'cool', 66, 'F').error,
+    'deadband',
   );
-  const message = await identifyDevice(gladys, weatherId, config);
-  assert.match(message.en, /no way to signal/);
+  assert.equal(
+    planSetpoint(zoneOf({ maxCsp: 79, maxCspC: 26 }), 'heat', 77, 'F').error,
+    'deadband',
+  );
+  assert.equal(planSetpoint(zoneOf(), 'heat', 68, 'F').same, true);
+  assert.equal(limitsOf(zoneOf({ maxHsp: 120 }), 'heat').F.max, SETPOINT_BOUNDS.heat.F.max);
+  assert.equal(planSetpoint(zoneOf({ maxHsp: undefined }), 'heat', 70, 'F').error, 'limits');
+  assert.equal(planSetpoint(zoneOf({}, { csp: undefined }), 'heat', 70, 'F').error, 'missing');
 });
 
-test('the test_weather action returns a multi-language message', async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({
-    ok: true,
-    json: async () => ({ current: { temperature_2m: 21.4, relative_humidity_2m: 55 } }),
-  });
-  try {
-    const weatherStation = DEVICE_BLUEPRINTS.find((bp) => bp.key === 'weather-station');
-    const message = await weatherStation.actions.test_weather(gladys, { fields: {}, config });
-    assert.match(message.en, /21\.4/);
-    assert.match(message.fr, /21\.4/);
-  } finally {
-    globalThis.fetch = realFetch;
+function modelOf(options = {}) {
+  const m = emptyModel();
+  applyMessage(
+    m,
+    {
+      SenderID: 'LCC',
+      Data: {
+        system: { config: { name: 'House', temperatureUnit: 'F' } },
+        zones: [
+          {
+            id: 0,
+            config: { name: 'Main', heatingOption: true, coolingOption: true, ...options },
+            status: { temperature: 70, temperatureStatus: 'good' },
+          },
+        ],
+      },
+    },
+    0,
+  );
+  return m;
+}
+
+// The core's own validator of supported_options, when a Gladys clone is at hand
+// (not on GitHub CI): the rules below are its schema, this is the proof.
+const CORE_NORMALIZE = '/home/claude/code/Gladys/server/utils/normalizeSupportedOptions.js';
+const normalizeSupportedOptions = existsSync(CORE_NORMALIZE)
+  ? createRequire(import.meta.url)(CORE_NORMALIZE).normalizeSupportedOptions
+  : undefined;
+
+test('the supported options follow the rules of the core (a bad one refuses all Discovery)', () => {
+  const gladys = createFakeGladys({ config: {} });
+  const OPTION_KEYS = ['id', 'value', 'label', 'sort_order'];
+  let lists = 0;
+  for (const language of ['fr', 'en']) {
+    for (const options of [{}, { coolingOption: false }, { heatingOption: false }]) {
+      const m = modelOf(options);
+      const device = buildZoneDevice(gladys, 'abcd1234', m, m.zones.get(0), { language });
+      for (const f of device.features) {
+        if (f.supported_options === undefined) continue;
+        lists += 1;
+        const allowStringValues = f.category === C.TEXT && f.type === TYPES.TEXT.SELECT;
+        assert.ok(f.supported_options.length > 0);
+        for (const option of f.supported_options) {
+          assert.equal(typeof option.label, 'string');
+          assert.ok(option.label.trim().length > 0);
+          assert.equal(option.label, option.label.trim());
+          assert.ok(
+            Number.isInteger(option.value) ||
+              (allowStringValues &&
+                typeof option.value === 'string' &&
+                option.value === option.value.trim() &&
+                option.value !== ''),
+          );
+          assert.deepEqual(
+            Object.keys(option).filter((k) => !OPTION_KEYS.includes(k)),
+            [],
+          );
+        }
+        const values = f.supported_options.map((o) => `${o.value}`);
+        assert.equal(new Set(values).size, values.length);
+        if (normalizeSupportedOptions) {
+          assert.doesNotThrow(() =>
+            normalizeSupportedOptions(f.supported_options, { allowStringValues }),
+          );
+        }
+      }
+    }
   }
+  assert.equal(lists, 12, 'mode and fan of each zone');
+});
+
+test('devices: no switch, no writable binary, ids frozen and parsed back', () => {
+  const gladys = createFakeGladys({ config: {} });
+  const m = modelOf({ coolingOption: false });
+  const zone = buildZoneDevice(gladys, 'abcd1234', m, m.zones.get(0), { language: 'en' });
+  const system = buildSystemDevice(gladys, 'abcd1234', m, { language: 'en' });
+  assert.equal(zone.external_id, 'ext:test-integration:lennox:abcd1234-zone0');
+  assert.equal(system.external_id, 'ext:test-integration:lennox:abcd1234');
+  assert.ok(!zone.features.some((f) => f.external_id.endsWith(':cool-setpoint')));
+  for (const f of [...zone.features, ...system.features]) {
+    assert.notEqual(f.category, 'switch');
+    assert.ok(f.type !== 'binary' || f.read_only);
+  }
+  const mode = zone.features.find((f) => f.external_id.endsWith(':mode'));
+  assert.deepEqual(
+    mode.supported_options.map((o) => o.value),
+    [0, 1],
+  );
+  assert.deepEqual(parseFeatureId(`${zone.external_id}:${F.MODE}`), {
+    serial: 'abcd1234',
+    zone: 0,
+    key: 'mode',
+  });
+  assert.deepEqual(parseFeatureId(`${system.external_id}:${F.OUTDOOR}`), {
+    serial: 'abcd1234',
+    zone: undefined,
+    key: 'outdoor-temperature',
+  });
+  assert.equal(parseFeatureId(`${zone.external_id}:bogus`), undefined);
+  assert.deepEqual(parseDeviceId(zone.external_id), { serial: 'abcd1234', zone: 0 });
+  // A created device keeps its features as created (no "structure changed").
+  const created = {
+    ...zone,
+    features: zone.features.map((f) => ({ ...f, unit: f.unit, min: -99 })),
+  };
+  const again = buildZoneDevice(gladys, 'abcd1234', m, m.zones.get(0), { language: 'en', created });
+  assert.ok(again.features.every((f) => f.min === -99 || f.min === undefined));
+});
+
+test('command values are strict', () => {
+  assert.deepEqual(commandValue(F.MODE, 0), { mode: 'off' });
+  assert.deepEqual(commandValue(F.MODE, '3'), { mode: 'heat and cool' });
+  assert.equal(commandValue(F.MODE, 4), undefined);
+  assert.equal(commandValue(F.MODE, ''), undefined);
+  assert.equal(commandValue(F.MODE, true), undefined);
+  assert.equal(commandValue(F.MODE, null), undefined);
+  assert.deepEqual(commandValue(F.FAN_MODE, 'circulate'), { fan: 'circulate' });
+  assert.equal(commandValue(F.FAN_MODE, 'turbo'), undefined);
+  assert.deepEqual(commandValue(F.HEAT_SETPOINT, '20.5'), { setpoint: 'heat', asked: 20.5 });
+  assert.equal(commandValue(F.TEMPERATURE, 20), undefined);
+});
+
+test('the address: no broadcast, multicast, unspecified, nor credentials shown back', () => {
+  assert.deepEqual(parseAddress('https://192.168.1.60/x'), { host: '192.168.1.60', port: 443 });
+  assert.deepEqual(parseAddress('thermostat.lan:8443'), { host: 'thermostat.lan', port: 8443 });
+  for (const bad of ['0.0.0.0', '224.0.0.1', '192.168.1.255', 'a b', 'u:p@1.2.3.4', '999.1.1.1']) {
+    assert.equal(parseAddress(bad), undefined, bad);
+  }
+  const c = normalizeConfig({
+    host: 'user:secret@thermostat',
+    allow_commands: 'yes',
+    poll_interval: '',
+  });
+  assert.doesNotMatch(c.invalidHost, /secret/);
+  assert.equal(c.allowCommands, false);
+  assert.equal(c.pollInterval, 10);
+  assert.equal(normalizeConfig({ poll_interval: 1 }).pollInterval, 5);
 });

@@ -1,177 +1,149 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "Lennox S30",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Lennox S30, E30 and M30 thermostats over their local API: zones, setpoints, modes, alerts.",
+    "fr": "Thermostats Lennox S30, E30 et M30 par leur API locale : zones, consignes, modes, alertes."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-lennox-s30:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-lennox-s30/main/cover.png",
+  "categories": ["climate"],
+  "transports": ["local"],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": {
+        "en": "Your Lennox thermostat",
+        "fr": "Votre thermostat Lennox"
+      },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Shows your Lennox S30, E30 or M30 thermostat in Gladys through its local API, without the Lennox cloud: one device per zone (temperature, humidity, mode, heating and cooling setpoints, running state, fan) and one for the system (outdoor temperature, alerts). On the thermostat, turn on \"Home Automation\" (Settings, Advanced settings), give it a fixed address in your router, enter that address below, save, then add the devices from the Discovery tab. The mode Off needs no option; the other modes, the setpoints and the fan mode only if you allow them below. Never tested with a real thermostat. Not affiliated with Lennox.",
+        "fr": "Affiche votre thermostat Lennox S30, E30 ou M30 dans Gladys par son API locale, sans le cloud Lennox : un appareil par zone (température, humidité, mode, consignes de chauffage et de climatisation, fonctionnement, ventilateur) et un pour le système (température extérieure, alertes). Sur le thermostat, activez « Home Automation » (Paramètres, Paramètres avancés), donnez-lui une adresse fixe dans votre box, saisissez cette adresse ci-dessous, enregistrez, puis ajoutez les appareils depuis l'onglet Découverte. Le mode Arrêt ne demande aucune option ; les autres modes, les consignes et le mode du ventilateur seulement si vous les autorisez ci-dessous. Jamais testé avec un vrai thermostat. Sans lien avec Lennox."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/LM1LC3N7/gladys-lennox-s30/blob/main/docs/fr.md",
+          "label": {
+            "en": "Guide (French)",
+            "fr": "Guide (français)"
+          }
+        },
+        {
+          "url": "https://github.com/LM1LC3N7/gladys-lennox-s30/blob/main/docs/en.md",
+          "label": {
+            "en": "Guide (English)",
+            "fr": "Guide (anglais)"
+          }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
-      "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
+      "key": "host",
+      "type": "string",
+      "label": {
+        "en": "IP address of the thermostat",
+        "fr": "Adresse IP du thermostat"
       },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
+      "description": {
+        "en": "An IPv4 address or a host name, optionally followed by a port (443 by default). The thermostat is reached over HTTPS; its certificate is pinned at the first contact.",
+        "fr": "Une adresse IPv4 ou un nom d'hôte, éventuellement suivi d'un port (443 par défaut). Le thermostat est joint en HTTPS ; son certificat est épinglé au premier contact."
+      },
+      "placeholder": {
+        "en": "192.168.1.60",
+        "fr": "192.168.1.60"
+      },
       "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "default": ""
     },
     {
-      "key": "longitude",
-      "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
-      "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
+      "key": "allow_commands",
+      "type": "boolean",
+      "label": {
+        "en": "Allow the commands",
+        "fr": "Autoriser les commandes"
       },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
+      "description": {
+        "en": "Off by default. On: Gladys may set the mode of a zone (heating, cooling, both), its heating and cooling setpoints (within the limits the thermostat gives) and its fan mode. Off: these commands are refused. The mode Off needs no option: it stops heating and cooling in the zone until another mode is set (from Gladys with this option on, from the thermostat or the Lennox app).",
+        "fr": "Désactivé par défaut. Activé : Gladys peut régler le mode d'une zone (chauffage, climatisation, les deux), ses consignes de chauffage et de climatisation (dans les limites que donne le thermostat) et le mode de son ventilateur. Désactivé : ces commandes sont refusées. Le mode Arrêt ne demande aucune option : il arrête le chauffage et la climatisation de la zone jusqu'à ce qu'un autre mode soit réglé (depuis Gladys avec cette option activée, depuis le thermostat ou l'application Lennox)."
+      },
+      "required": false,
+      "default": false
     },
     {
-      "key": "unit",
+      "key": "poll_interval",
+      "type": "number",
+      "label": {
+        "en": "Refresh interval (s)",
+        "fr": "Intervalle de rafraîchissement (s)"
+      },
+      "description": {
+        "en": "How often the changes queued by the thermostat are read, in seconds.",
+        "fr": "Fréquence de lecture des changements mis en file par le thermostat, en secondes."
+      },
+      "required": false,
+      "default": 10,
+      "min": 5,
+      "max": 300
+    },
+    {
+      "key": "language",
       "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
-      "required": false,
-      "default": "celsius",
-      "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
-      ]
-    },
-    {
-      "key": "poll_frequency",
-      "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
+      "label": {
+        "en": "Language of the feature names",
+        "fr": "Langue des noms des fonctionnalités"
+      },
       "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+        "en": "Used for the feature names of the devices added from now on, for the status texts and for the command errors.",
+        "fr": "Sert aux noms des fonctionnalités des appareils ajoutés désormais, aux textes d'état et aux erreurs des commandes."
       },
       "required": false,
-      "default": 300,
-      "min": 60,
-      "max": 3600
+      "default": "fr",
+      "options": [
+        {
+          "value": "fr",
+          "label": {
+            "en": "French",
+            "fr": "Français"
+          }
+        },
+        {
+          "value": "en",
+          "label": {
+            "en": "English",
+            "fr": "Anglais"
+          }
+        }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
+      "key": "test_connection",
+      "label": {
+        "en": "Test the connection",
+        "fr": "Tester la connexion"
+      },
+      "description": {
+        "en": "Reads the thermostat once, if the interval since the last read has passed, and shows its state.",
+        "fr": "Lit le thermostat une fois, si l'intervalle depuis la dernière lecture est passé, et affiche son état."
+      },
+      "timeout_seconds": 60
     },
     {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
-    }
-  ],
-  "scene_triggers": [
-    {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
-      "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
+      "key": "trust_certificate",
+      "label": {
+        "en": "Trust the new certificate",
+        "fr": "Faire confiance au nouveau certificat"
       },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
-        },
-        {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
-          "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
-          ]
-        }
-      ],
-      "variables": [
-        {
-          "key": "target",
-          "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
-        }
-      ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
       "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
+        "en": "Only after the status said the certificate of the thermostat changed (a thermostat replaced or updated): two clicks: the first one shows the whole fingerprint, a second one 3 to 60 s later pins exactly that one, then reads the thermostat.",
+        "fr": "Seulement après que l'état a signalé un changement du certificat du thermostat (thermostat remplacé ou mis à jour) : deux clics : le premier montre l'empreinte entière, un second 3 à 60 s plus tard épingle exactement celle-là, puis lit le thermostat."
       },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
+      "timeout_seconds": 60
     }
   ]
 }

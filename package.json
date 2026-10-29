@@ -1,8 +1,8 @@
 {
-  "name": "gladys-integration-template-js",
-  "version": "1.0.0",
+  "name": "gladys-lennox-s30",
+  "version": "0.1.0",
   "private": true,
-  "description": "Official starter template to build an external integration for Gladys Assistant with the JavaScript SDK.",
+  "description": "Gladys Assistant external integration for Lennox S30, E30 and M30 thermostats over their local API (zones, temperature, humidity, setpoints, modes, fan, alerts; Off always available, other commands optional). Unofficial, not affiliated with Lennox.",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -10,7 +10,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node --test"
+    "test": "node --test --test-timeout=60000",
+    "audit": "npm audit --omit=dev",
+    "cover": "node scripts/cover.mjs cover.png"
   },
   "engines": {
     "node": ">=22"

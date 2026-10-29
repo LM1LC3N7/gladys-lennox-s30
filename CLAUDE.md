@@ -15,9 +15,9 @@ its only runtime dependency. It started from the official JavaScript template.
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
+npm test                                  # node --test (60 s per test at most)
 node --test test/devices.test.js          # one file
-node --test --test-name-pattern "plug"    # tests whose name matches
+node --test --test-name-pattern "stop"    # tests whose name matches
 npm run lint                              # ESLint
 npm run format:check                      # Prettier, as the CI runs it
 npm run format                            # Prettier, fix in place
@@ -32,28 +32,37 @@ pushing.
 
 ```
 index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
+src/handlers.js                   SDK handlers -> LennoxApp (shared with the tests)
+src/app.js                        configuration, the link, reads, devices, states, status, commands, Off
+src/devices.js                    devices and states of the zones and the system (pure); keys frozen
+src/setpoints.js                  setpoints in °F and °C, limits, deadband (pure)
+src/lennox/protocol.js            the local API: bodies, answers, the model built from the queue (pure)
+src/lennox/alerts.js              texts of the alert codes (from lennoxs30api)
+src/lennox/http.js                one HTTPS request on its own TLS connection, pin checked first
+src/store.js                      /data: address, serial, pin, pause, Off kept, guards (no secret)
+src/publisher.js                  states to Gladys within 300 per minute
 src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
+src/i18n.js                       English and French runtime texts
+scripts/cover.mjs                 cover.png generator (plain Node, no dependency)
 gladys-assistant-integration.json manifest: name, config_schema, actions, image...
 docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
 test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
+test/kit/                         parts of gladys-testkit: fake servers, clocks, test certificates
+test/fixtures/                    messages of a real thermostat (lennoxs30api, MIT)
 .github/scripts/release.mjs       release helpers (manifest bump, changelog), tested in test/
 ```
 
 ## Rules
 
 - **External ids are forever.** Build them with
-  `gladys.externalIds(type, platformId)`, `platformId` being the unique id the
-  platform gives the device (serial, cloud id, MAC), never a label. Gladys keys
-  devices, their history, scenes and dashboards on them: changing one creates a
-  new device and orphans the old one. The same goes for every key users store:
-  manifest `config_schema`, `actions`, widget and scene keys, feature keys.
+  `gladys.externalIds(type, platformId)`, `platformId` being the serial number
+  of the thermostat (`<serial>-zone<n>` for a zone), never a label nor the IP. Gladys keys devices, their
+  history, scenes and dashboards on them: changing one creates a new device
+  and orphans the old one. The same goes for every key users store: manifest
+  `config_schema`, `actions`, feature keys.
 - **The container rootfs is read-only.** Write only under `/data`, the one
-  writable volume. Never log tokens, passwords or API keys.
+  writable volume. The local API takes no credential; never keep the body of
+  an HTTP answer in an error.
 - **Versions belong to the Release workflow** (Actions → Release). Never edit
   `version` in `package.json` or in the manifest, nor the `docker_image` tag,
   by hand — except on the README's hand-pushed tag path, which bumps all three
@@ -64,13 +73,33 @@ test/                             node --test, against the SDK's fake Gladys (in
   becomes the notes of the GitHub Release.
 - **Manifest.** Texts are multi-language objects `{ "en": ..., "fr": ... }`:
   `label`, `description` and `placeholder` alike, never a plain string. The
-  catalog `description` holds 10 to 100 characters per language. A field the
-  older cores do not know needs a higher `gladys_version` minimum
-  (`categories`: 4.86.0; `widgets`, `scene_triggers`, `scene_actions`,
-  `type: "provider"`: 5.1.0). `test/manifest.test.js` ties the manifest to the
-  code (defaults, action, scene and widget handlers): change both sides
+  catalog `description` holds 10 to 100 characters per language.
+  `test/manifest.test.js` ties the manifest to the code: change both sides
   together.
 - **User-facing text** is bilingual (English and French): action messages,
-  manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
+  manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync. Files are
+  UTF-8 without BOM and without control bytes (`test/encoding.test.js`).
 - **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
-  in English. Tests never touch the network.
+  in English. Tests never touch the network (the TLS tests use the loopback).
+- **Clocks.** Every decision runs on the monotonic clock, read once per
+  decision; the wall clock only dates /data. Tests use the virtual clock of `test/kit` (it
+  moves at every read) and one real-clock test (x20).
+- **Lennox S30.** Local API only (Connect, RequestData, Retrieve, Publish of
+  lennoxs30api), our own application id `gladys`: nothing of the cloud mode of
+  lennoxs30api, nothing that imitates the Lennox app (User-Agent, application
+  id, certificate). One request at a time, each on its own connection whose
+  certificate is checked against the pin BEFORE any byte is written (the first
+  pin in /data before anything is read). A new session (Connect) forgets every
+  value and the identity until the thermostat sends them again. The mode Off
+  of a zone needs no option and is never held back (a read or a command under
+  way, a pause, no configuration read, a guard, /data slow or read only); not
+  applied, it is kept in /data and sent again every 30 s, never dropped by the
+  time: only a read showing the zone off, a newer mode sent from Gladys, or
+  another thermostat at the address end it; 3 refusals in a row or 3 accepted
+  sends contradicted by the reads give it up, said in the status and the
+  badge. The other modes, the setpoints and the fan mode are behind
+  `allow_commands` (off), decided on the queue emptied after the click,
+  checked again in `beforeSend`, guarded in /data before the first byte, a
+  success only once a read after the send shows the value asked. Setpoints are
+  written in both units, each within the limits of the zone and ours
+  (`SETPOINT_BOUNDS`). Never a switch.
