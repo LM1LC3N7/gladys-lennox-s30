@@ -99,8 +99,9 @@ test/fixtures/                    messages of a real thermostat (lennoxs30api, M
   every 30 s, pause or not) and sent again when one shows the zone running;
   it ends on a read showing the zone off after the click (message by
   message: a start at the thermostat right after is never fought), on a
-  newer mode of the zone ACCEPTED by the thermostat, or when another
-  thermostat answers; a new address keeps it until the serial is read there;
+  newer mode of the zone that left without a refusal (a 4xx, a code other
+  than 1, a 429 or a redirection leave it), or when another thermostat
+  answers; a new address keeps it until the serial is read there;
   3 refusals in a row or 3 accepted sends contradicted give it up, said in
   the status and the badge. A new session (Connect) only after a 4xx of the
   queue; the numbers of the messages never go back. The other modes, the setpoints and the fan mode are behind

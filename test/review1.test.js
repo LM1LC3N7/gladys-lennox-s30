@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { FEATURES as F, SECOND, THERMOSTAT_MODE } from '../src/constants.js';
 import { memoryStore } from '../src/store.js';
 import { FP, NOW, SERIAL_ID, fakeLennox, initialState } from './helpers/fakeLennox.js';
-import { ALLOWED, CONFIG, message, setup } from './helpers/app.js';
+import { ALLOWED, CONFIG, ZONE, message, setup } from './helpers/app.js';
 import { testClock } from './kit/index.mjs';
 
 const OFF = THERMOSTAT_MODE.OFF;
@@ -516,4 +516,93 @@ test('I1: a command takes the link from the check of an Off that hangs', async (
   await advance(5 * SECOND, 50);
   assert.equal((await set).success, true, (await set).error);
   await off;
+});
+
+// --- Review r3 -----------------------------------------------------------------
+
+test('B4: an Off clicked with the mode unknown (thermostat offline), accepted, ignored, then a restart and ANOTHER mode: never lifted, sent again, then given up and said', async (t) => {
+  const store = memoryStore();
+  const first = await setup(t, { store });
+  await first.advance(15 * SECOND);
+  // A cut: the reads fail, the mode read before is not the mode at the click.
+  first.lennox.fail['GET /Messages/gladys/Retrieve'] = 'drop';
+  await first.advance(first.app.interval + SECOND);
+  assert.equal(first.app.reader.online, false);
+  first.lennox.ignorePublish = true;
+  await first.press(0, F.MODE, OFF);
+  assert.equal(store.data.pendingStops['0'].state, 'awaiting');
+  assert.equal(store.data.pendingStops['0'].from, null);
+  first.app.halt();
+  delete first.lennox.fail['GET /Messages/gladys/Retrieve'];
+  // During the restart the zone goes to cool; the thermostat still ignores the Off.
+  first.lennox.change(0, { systemMode: 'cool' });
+  first.lennox.queue = undefined;
+  const again = await setup(t, {
+    store,
+    lennox: first.lennox,
+    clock: first.clock,
+    create: false,
+    devices: first.gladys.fake.devices,
+  });
+  await again.advance(5 * 60 * SECOND);
+  assert.deepEqual(again.app.memory.stopsLifted, {}, 'an unknown mode at the click never lifts it');
+  assert.equal(offs(first.lennox), 3, 'sent again: 3 accepted sends at most');
+  assert.equal(store.data.stopGivenUp['0']?.status, 'not applied');
+  assert.match(message(again.gladys).en, /given up \(not applied/);
+});
+
+test('B4: the mode at the click is taken from a thermostat read online only, never from a read before a cut', async (t) => {
+  const { lennox, press, advance, app } = await setup(t);
+  lennox.fail['GET /Messages/gladys/Retrieve'] = 'drop';
+  await advance(app.interval + SECOND);
+  assert.equal(app.reader.online, false);
+  const read = app.model.zones.get(0).period.systemMode;
+  assert.equal(read.value, 'heat');
+  assert.ok(app.freshField(read), 'the mode read before the cut is still fresh');
+  await press(0, F.MODE, OFF);
+  assert.equal(app.memory.pendingStops[0].state, 'awaiting');
+  assert.equal(app.memory.pendingStops[0].from, null);
+});
+
+test('m14: a newer mode answered by a redirection (3xx) leaves the Off kept, sent again later', async (t) => {
+  const { lennox, press, advance, store } = await setup(t, { config: ALLOWED });
+  ignoreOff(lennox);
+  await press(0, F.MODE, OFF);
+  assert.equal(store.data.pendingStops['0'].state, 'awaiting');
+  lennox.fail['POST /Messages/Publish'] = 302;
+  assert.equal((await press(0, F.MODE, THERMOSTAT_MODE.HEATING)).success, false);
+  assert.ok(store.data.pendingStops['0'], 'kept after a redirection');
+  assert.equal(lennox.state.zones[0].period.systemMode, 'heat');
+  delete lennox.fail['POST /Messages/Publish'];
+  const before = offs(lennox);
+  await advance(60 * SECOND);
+  assert.ok(offs(lennox) > before, 'sent again');
+  assert.equal(lennox.state.zones[0].period.systemMode, 'off');
+  assert.deepEqual(store.data.pendingStops, {});
+});
+
+test('m15: an Off given up then applied at the click: the status says it at once, before any other read', async (t) => {
+  const { lennox, send, press, advance, store, gladys } = await setup(t, {
+    config: { ...CONFIG, poll_interval: 300 },
+  });
+  lennox.publishCode = 2;
+  await press(0, F.MODE, OFF);
+  await advance(11 * 60 * SECOND, 30 * SECOND);
+  assert.equal(store.data.stopGivenUp['0']?.status, 'code 2');
+  assert.match(message(gladys).en, /given up/);
+  lennox.publishCode = 1;
+  const reads = lennox.count('GET /Messages/gladys/Retrieve');
+  let answer;
+  send(0, F.MODE, OFF).then((a) => {
+    answer = a;
+  });
+  for (let i = 0; i < 40 && !answer; i += 1) await advance(25, 25);
+  assert.equal(answer?.success, true, answer?.error);
+  // The read of the stop itself only; the follow-up reads come 5 s later.
+  await advance(500, 50);
+  assert.equal(lennox.count('GET /Messages/gladys/Retrieve'), reads + 1);
+  assert.doesNotMatch(message(gladys).en, /given up/);
+  assert.match(message(gladys).en, /^Connected/);
+  const badge = gladys.fake.transports.filter((e) => e.device_external_id === ZONE(0)).at(-1);
+  assert.equal(badge.degraded, undefined);
 });

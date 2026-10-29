@@ -97,8 +97,9 @@ up to date at the end of every milestone.
   when two reads, an interval apart, show ANOTHER mode (said in the status);
   the same mode or an unknown one sends it again (in doubt, the Off goes, a
   start at the thermostat in that same mode during the restart included).
-- **Newer mode** (r2 m13, the fiche): a mode that left without a refusal
-  (4xx, code other than 1, 429) ends the Off kept before it, a silence too.
+- **Newer mode** (r2 m13, r3 m14, the fiche): a mode that left without a
+  refusal (4xx, code other than 1, 429) nor a redirection (3xx) ends the Off
+  kept before it, a silence too.
 - **4xx of Connect, RequestData or Publish** (r2 B5): a new session; for an
   Off, a new session and the Off again before a refusal counts.
 - **New address**: the stops kept follow the serial; sent once the new
@@ -115,6 +116,12 @@ up to date at the end of every milestone.
 - Away mode: the Off writes the manual schedule (as lennoxs30api for a
   mode); in away mode the thermostat follows the away schedule (24+n), so
   the Off may be given up after three sends. To check on a real thermostat.
+- Rare case (review r3, m16), to check: an Off accepted but ignored by the
+  thermostat, for a zone that follows a program, then a restart of the
+  module while the program moves to a period of another `systemMode`: the
+  zone read in the mode of the new period is taken for a change made at the
+  thermostat, and the Off is lifted (said in the status). It needs all four:
+  the Off ignored, a program, a restart, a new period of another mode.
 
 - Milestone 1: 37 mutants on the guards (option, Off order and retries,
   epochs, guards, bounds, deadband, freshness, /data), all killed by a test.

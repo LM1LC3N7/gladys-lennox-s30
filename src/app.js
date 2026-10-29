@@ -112,6 +112,9 @@ const OVERRIDE_FIELDS = [
 
 const newSession = () => ({ connected: false, serial: undefined, subscribedAt: -Infinity });
 
+/** A redirection (3xx): the change was not taken where it was sent (the fiche: never "left"). */
+const redirected = (err) => err.kind === ERROR_KINDS.HTTP && err.status >= 300 && err.status < 400;
+
 export class LennoxApp {
   constructor({
     gladys,
@@ -1550,7 +1553,12 @@ export class LennoxApp {
     });
   }
 
-  /** The stop of a zone is done: kept no more, its waiters answered, the status said at once. */
+  /**
+   * The stop of a zone is done: kept no more, its waiters answered, the
+   * status said at once. The read that saw it publishes right after too
+   * (applyMessages): either one refreshes the status, this one for any other
+   * caller.
+   */
   stopDone(zone) {
     delete this.memory.pendingStops[zone];
     delete this.memory.stopGivenUp[zone];
@@ -2221,13 +2229,14 @@ export class LennoxApp {
       }
       // A newer mode that left without a refusal (a silence, a cut, a 5xx)
       // ends the stop kept before it, as an accepted one (the fiche: only a
-      // 4xx, a 429 or a command never sent leave the stop).
+      // 4xx, a 429, a redirection or a command never sent leave the stop).
       const left = live.filter(
         (e) =>
           e.sentAt !== undefined &&
           !notSent(err) &&
           err.kind !== ERROR_KINDS.REJECTED &&
-          err.kind !== ERROR_KINDS.RATE_LIMITED,
+          err.kind !== ERROR_KINDS.RATE_LIMITED &&
+          !redirected(err),
       );
       if (left.length > 0) this.modesAccepted(left);
       if (live.some((e) => e.sentAt !== undefined)) this.followUp();
@@ -2250,9 +2259,10 @@ export class LennoxApp {
   }
 
   /**
-   * A newer mode accepted by the thermostat (a click with the option) ends the
-   * stop kept for its zone, if that stop was clicked before it; a mode
-   * refused (a 4xx, a code other than 1, a 429) or unanswered leaves it.
+   * A newer mode that left without a refusal (accepted, or unanswered: a
+   * silence, a cut, a 5xx; a click with the option) ends the stop kept for
+   * its zone, if that stop was clicked before it; a mode refused (a 4xx, a
+   * code other than 1, a 429), redirected (3xx) or never sent leaves it.
    */
   modesAccepted(live) {
     for (const e of live) {
