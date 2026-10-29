@@ -101,6 +101,8 @@ test('setpoints: the other one moves the safe way, within its limits, or the com
   );
   assert.equal(planSetpoint(zoneOf(), 'heat', 68, 'F').same, true);
   assert.equal(limitsOf(zoneOf({ maxHsp: 120 }), 'heat').F.max, SETPOINT_BOUNDS.heat.F.max);
+  assert.equal(limitsOf(zoneOf({ maxHspC: 35 }), 'heat').C.max, SETPOINT_BOUNDS.heat.C.max);
+  assert.equal(SETPOINT_BOUNDS.heat.C.max, 32);
   assert.equal(planSetpoint(zoneOf({ maxHsp: undefined }), 'heat', 70, 'F').error, 'limits');
   assert.equal(planSetpoint(zoneOf({}, { csp: undefined }), 'heat', 70, 'F').error, 'missing');
 });

@@ -42,24 +42,37 @@ first read after a restart, without a configuration read (from `/data`), even wh
 
 It is **refused** only:
 
-- without an address of the thermostat (neither in the configuration nor in `/data`);
+- without an address of the thermostat (neither a valid one in the configuration nor one in `/data`);
 - when `/data` cannot be read (the pinned certificate is then unknown);
 - for a device of another thermostat than the one answering at the address.
 
-Until the thermostat reads off, the Off is **kept in `/data`** and sent again every 30 seconds (and at a
-restart), with no time limit. It ends when a read shows the zone off, when another mode of the zone leaves
-Gladys (a click with the option), or when another thermostat answers at the address. An unreachable thermostat
-or a changed certificate does not count as a try. Refused three times in a row by the thermostat, or accepted
-three times without ever reading off, it is given up, and the status, the badge of the device and the answer say
-so. In away mode it targets the manual schedule, as lennoxs30api does (not checked on a real thermostat).
+Until the thermostat reads off, the Off is **kept in `/data`**, with no time limit:
+
+- not sent yet (thermostat unreachable, certificate changed, pause asked): sent again every 30 seconds and at a
+  restart; this does not count as a try;
+- refused by the thermostat (a 4xx, an answer other than "code 1"): sent again 5 minutes later, given up after
+  three refusals in a row;
+- accepted: read again 6 seconds later then every 30 seconds, pause or not, and sent again when a read shows the
+  zone running 5 seconds or more after the send; given up after three accepted sends never read off.
+
+It ends when a read shows the zone off after the click (even when the zone is started again at the thermostat
+right after: a start at the thermostat or in the Lennox app is not fought), when another mode of the zone,
+clicked after it in Gladys (with the option), is **accepted** by the thermostat (a refused mode leaves the Off
+kept), or when another thermostat answers at the address (said in the status). An Off accepted before a restart
+of the module ends when two reads in a row after the restart show the zone running (changed at the thermostat
+meanwhile). A new address saved keeps the Offs: they are sent once the new address shows the serial number of
+the same thermostat. A give-up is said in the status, the badge of the device and the answer, until a read shows
+the zone off or a new click. In away mode, the Off targets the manual schedule as lennoxs30api does, while the
+thermostat follows the away schedule: it may be given up after three sends (not checked on a real thermostat).
 
 ### The other commands (option "Allow the commands")
 
 Off by default. On: the mode (heating, cooling, both), the heating and cooling setpoints and the fan mode.
 
 - Decided on the queue of the thermostat emptied right after the click; refused when a value they need was not
-  read, in away mode, in single setpoint mode, during an Off of the zone under way (but a mode, which ends it) and
-  while the previous command of the zone is not seen yet (90 s at most).
+  read, in away mode, during an Off of the zone under way (but a mode, which ends it) and
+  while the previous command of the zone is not seen yet (90 s at most). In single setpoint mode, the setpoints
+  are refused.
 - Setpoints are rounded to the step of the thermostat (1 °F, 0.5 °C), the other unit is computed exactly, and
   both values must stay within the limits of the zone read from the thermostat and ours (heating 40 to 90 °F,
   cooling 60 to 99 °F). When the heating setpoint would come within the deadband of the zone of the cooling

@@ -161,12 +161,13 @@ export function dataOf({ schedules = [], zones = [] }) {
 
 // --- Model ---------------------------------------------------------------------------
 
-export const emptyModel = () => ({
+/** An empty model; `seq` continues the numbering of the messages of the previous session. */
+export const emptyModel = (seq = 0) => ({
   system: {},
   zones: new Map(),
   schedules: new Map(),
-  /** The number of the last message applied. */
-  seq: 0,
+  /** The number of the last message applied (never back: a new session goes on from it). */
+  seq,
 });
 
 /** Sets `obj[key]` from `value` (undefined: left as it is), with its seq and date. */
@@ -240,8 +241,19 @@ function applyZone(model, raw, stamp) {
   }
   const zone = zoneOf(model, raw.id);
   if (plain(raw.config)) {
+    const before = zone.config.scheduleId?.value;
     for (const [key, read] of Object.entries(CONFIG_FIELDS)) {
       put(zone.config, key, read(raw.config[key]), stamp);
+    }
+    const now = zone.config.scheduleId?.value;
+    const manual = SCHEDULE.manual(raw.id);
+    if (now === manual && before !== manual && model.schedules.has(manual)) {
+      // The zone switched to its manual schedule: its period is that schedule's
+      // (a status.period in the same message, if any, still wins below).
+      const stored = model.schedules.get(manual);
+      for (const [key, field] of Object.entries(stored)) {
+        put(zone.period, key, field.value, stamp);
+      }
     }
     const hold = raw.config.scheduleHold;
     if (plain(hold)) {

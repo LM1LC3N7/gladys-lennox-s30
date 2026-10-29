@@ -148,6 +148,10 @@ export function planSetpoint(zone, kind, asked, unit) {
       if (!within(heat, heatLimits)) return { error: 'deadband' };
     }
   }
+  // Every value written, the one taken back as read included, within its limits.
+  if (!within(heat, heatLimits) || !within(cool, coolLimits)) {
+    return { error: 'read' };
+  }
   const fields = { hsp: heat.F, hspC: heat.C, csp: cool.F, cspC: cool.C };
   if (
     fields.hsp === now.heat.F &&
@@ -158,4 +162,30 @@ export function planSetpoint(zone, kind, asked, unit) {
     return { same: true, fields };
   }
   return { fields };
+}
+
+/**
+ * Whether every value of a period written to the thermostat (an override
+ * copied from the period read) is within its limits: the setpoints in both
+ * units (`limitsOf`), the single setpoint between the lowest heat and the
+ * highest cool setpoint, the humidity setpoints in 0-100 %, the start time
+ * within a week. False when a limit is unknown.
+ */
+export function periodWithin(zone, period) {
+  const heat = limitsOf(zone, 'heat');
+  const cool = limitsOf(zone, 'cool');
+  if (!heat || !cool) return false;
+  const inRange = (v, min, max) => Number.isFinite(v) && v >= min - EPS && v <= max + EPS;
+  const checks = {
+    hsp: (v) => inRange(v, heat.F.min, heat.F.max),
+    hspC: (v) => inRange(v, heat.C.min, heat.C.max),
+    csp: (v) => inRange(v, cool.F.min, cool.F.max),
+    cspC: (v) => inRange(v, cool.C.min, cool.C.max),
+    sp: (v) => inRange(v, heat.F.min, cool.F.max),
+    spC: (v) => inRange(v, heat.C.min, cool.C.max),
+    husp: (v) => Number.isInteger(v) && v >= 0 && v <= 100,
+    desp: (v) => Number.isInteger(v) && v >= 0 && v <= 100,
+    startTime: (v) => Number.isInteger(v) && v >= 0 && v <= 7 * 86_400,
+  };
+  return Object.entries(period).every(([key, value]) => !checks[key] || checks[key](value));
 }

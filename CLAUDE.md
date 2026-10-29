@@ -92,12 +92,18 @@ test/fixtures/                    messages of a real thermostat (lennoxs30api, M
   pin in /data before anything is read). A new session (Connect) forgets every
   value and the identity until the thermostat sends them again. The mode Off
   of a zone needs no option and is never held back (a read or a command under
-  way, a pause, no configuration read, a guard, /data slow or read only); not
-  applied, it is kept in /data and sent again every 30 s, never dropped by the
-  time: only a read showing the zone off, a newer mode sent from Gladys, or
-  another thermostat at the address end it; 3 refusals in a row or 3 accepted
-  sends contradicted by the reads give it up, said in the status and the
-  badge. The other modes, the setpoints and the fan mode are behind
+  way, a pause, no configuration read, a guard, /data slow or read only: no
+  wait on /data anywhere on its path nor in the reads); not sent, it is kept
+  in /data and sent again every 30 s, never dropped by the time; accepted, it
+  is checked by reads of its own (everything asked again, 6 s after, then
+  every 30 s, pause or not) and sent again when one shows the zone running;
+  it ends on a read showing the zone off after the click (message by
+  message: a start at the thermostat right after is never fought), on a
+  newer mode of the zone ACCEPTED by the thermostat, or when another
+  thermostat answers; a new address keeps it until the serial is read there;
+  3 refusals in a row or 3 accepted sends contradicted give it up, said in
+  the status and the badge. A new session (Connect) only after a 4xx of the
+  queue; the numbers of the messages never go back. The other modes, the setpoints and the fan mode are behind
   `allow_commands` (off), decided on the queue emptied after the click,
   checked again in `beforeSend`, guarded in /data before the first byte, a
   success only once a read after the send shows the value asked. Setpoints are

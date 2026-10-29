@@ -85,9 +85,31 @@ up to date at the end of every milestone.
   one moves the safe way within its limits (as the Lennox app does), else
   refused. A guard per zone (in /data before the first byte) refuses the next
   command of the zone until a read shows the previous one (90 s at most).
-- **Poll**: 10 s by default (5 to 300 s), one short Retrieve per read.
+- **Poll**: 10 s by default (5 to 300 s), one short Retrieve per read; a
+  new session (Connect) only after a 4xx of the queue (a silence, a 5xx or a
+  429 keep it: the numbers of the messages go on).
+- **Off accepted, checked** (review r1): a stop accepted is checked by reads
+  of its own, pause or not: RequestData (everything sent again) 6 s after,
+  then every 30 s while it waits; a zone still running 5 s or more after the
+  send means it was not applied: sent again (3 accepted sends at most).
+- **Off accepted before a restart** (review r1, I1): what the thermostat
+  showed between the send and the restart is unknown; two reads in a row
+  after the restart showing the zone running end it (a start at the
+  thermostat is not fought), logged. To confirm with Louis.
+- **New address**: the stops kept follow the serial; sent once the new
+  address shows it, dropped and said when it shows another one.
+- **Every value written back is bounded** (review r1, I4): the other
+  setpoint as read, and every field of a period copied into an override
+  (setpoints, single setpoint, humidity, start time).
+- **Scenes**: commands clicked within 100 ms share one round.
 
 ## Open points (mutation testing, reviews)
+
+- Review r1 (REFUSED, 3 blocking, 5 important, 10 minor): fixed in the commit
+  "Fix r1 review"; its scenarios replayed (`_lots/lot18/reviews/lennox-s30/`).
+- Away mode: the Off writes the manual schedule (as lennoxs30api for a
+  mode); in away mode the thermostat follows the away schedule (24+n), so
+  the Off may be given up after three sends. To check on a real thermostat.
 
 - Milestone 1: 37 mutants on the guards (option, Off order and retries,
   epochs, guards, bounds, deadband, freshness, /data), all killed by a test.

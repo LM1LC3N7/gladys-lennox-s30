@@ -140,11 +140,18 @@ export function fakeLennox({ timers, state = initialState() } = {}) {
     change(id, period) {
       const z = this.state.zones.find((x) => x.id === id);
       Object.assign(z.period, period);
+      // The schedule the zone follows changes with it (a change at the thermostat).
+      if (this.state.schedules[z.scheduleId])
+        Object.assign(this.state.schedules[z.scheduleId], period);
       this.push(
         z.scheduleId === 16 + id
           ? { schedules: [{ id: 16 + id, schedule: { periods: [{ id: 0, period }] } }] }
           : { zones: [{ id, status: { period } }] },
       );
+    },
+    /** Applies a change at once (for a test answering Publish itself). */
+    applyNow(data) {
+      apply(this, data);
     },
     exchange: (opts) => handle(fake, opts, timers),
   };
@@ -165,7 +172,7 @@ const systemData = (s) => ({
     alert: s.alert,
     zoningMode: s.zoningMode,
     numberOfZones: s.numberOfZones,
-    singleSetpointMode: false,
+    singleSetpointMode: s.single ?? false,
   },
 });
 

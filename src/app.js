@@ -79,7 +79,7 @@ import {
   zoneIds,
   zoneStates,
 } from './devices.js';
-import { planSetpoint } from './setpoints.js';
+import { periodWithin, planSetpoint } from './setpoints.js';
 import { ERRORS, T, age, word } from './i18n.js';
 import { StatePublisher } from './publisher.js';
 import { emptyMemory, fileStore, fromDisk, toDisk } from './store.js';
@@ -148,6 +148,9 @@ export class LennoxApp {
     this.inFlight = new Map();
     this.queue = [];
     this.roundRunning = undefined;
+    this.commandWaiting = false;
+    /** Commands sent, waiting for a read showing them (until their answer time). */
+    this.shownWaiters = new Set();
     /** zone -> a number moved by each stop clicked (what was emitted before gives way). */
     this.stopEpochs = new Map();
     /** zone -> [{ resolve }] waiting for a read showing the zone off. */
@@ -156,6 +159,9 @@ export class LennoxApp {
     this.stopsAgain = false;
     this.stopsKick = undefined;
     this.stopTimer = undefined;
+    this.checkTimer = undefined;
+    /** Successful reads of the queue (a stop lifted by a change read twice counts them). */
+    this.reads = 0;
     this.published = undefined;
     this.badge = undefined;
     this.lastStatus = undefined;
@@ -240,6 +246,13 @@ export class LennoxApp {
     if (this.hasUnsentStops() && !this.stopTimer && this.address()) {
       this.armStopTimer(0);
     }
+    if (this.hasAwaitingStops() && !this.checkTimer && this.address()) {
+      this.armStopCheck(0);
+    }
+  }
+
+  hasAwaitingStops() {
+    return Object.values(this.memory.pendingStops).some((p) => p.state === 'awaiting');
   }
 
   cancelConfigRetry() {
@@ -337,6 +350,9 @@ export class LennoxApp {
     if (this.hasUnsentStops()) {
       this.armStopTimer(0);
     }
+    if (this.hasAwaitingStops()) {
+      this.armStopCheck(TIMINGS.stopCheck);
+    }
     await this.tick();
   }
 
@@ -374,9 +390,23 @@ export class LennoxApp {
         this.logger.info(
           'Lennox: another address, the identity and the pin of the old one are forgotten',
         );
+        // The stops kept follow the thermostat (its serial) to its new address:
+        // sent first once the new address shows the same serial, dropped (and
+        // said) when it shows another one. Never dropped unsent otherwise.
+        for (const [zone, p] of Object.entries(old.pendingStops)) {
+          this.memory.pendingStops[zone] = {
+            ...p,
+            state: 'unsent',
+            verify: true,
+            notBefore: -Infinity,
+            refusal: null,
+            accepted: 0,
+          };
+        }
+        this.memory.stopGivenUp = { ...old.stopGivenUp };
       }
       this.lastReadAt = -Infinity;
-      await this.saveMemory();
+      this.saveLater();
     }
     return true;
   }
@@ -388,7 +418,10 @@ export class LennoxApp {
 
   /** The address of the thermostat: the configured one, or (no configuration yet) the one of /data. */
   address() {
-    if (this.config) return this.config.address;
+    if (this.config?.address) return this.config.address;
+    // No configuration read yet, or an address typed that is not one: the
+    // address of /data (the thermostat read last), for the stops only (no
+    // read starts without a configured address).
     return this.loaded ? addressOfKey(this.memory.target) : undefined;
   }
 
@@ -399,6 +432,10 @@ export class LennoxApp {
     if (this.stopTimer) {
       this.timers.clearTimeout(this.stopTimer);
       this.stopTimer = undefined;
+    }
+    if (this.checkTimer) {
+      this.timers.clearTimeout(this.checkTimer);
+      this.checkTimer = undefined;
     }
     this.clearFollowUps();
     if (this.holder) {
@@ -463,6 +500,19 @@ export class LennoxApp {
     }
   }
 
+  /** A save waited for `ms` at most (false: failed or still writing). */
+  async saveWithin(ms) {
+    let timer;
+    const result = await Promise.race([
+      this.saveMemory(),
+      new Promise((resolve) => {
+        timer = this.timers.setTimeout(() => resolve(false), Math.max(0, ms));
+      }),
+    ]);
+    this.timers.clearTimeout(timer);
+    return result;
+  }
+
   /** A save never waited for (the stop path): its failure is only logged. */
   saveLater() {
     this.saveMemory().catch(() => {});
@@ -503,7 +553,7 @@ export class LennoxApp {
       this.memory.pin = fingerprint;
       if (protective) {
         this.saveLater();
-      } else if (!(await this.saveMemory())) {
+      } else if (!(await this.saveWithin(TIMINGS.saveWait))) {
         if (this.memory.pin === fingerprint) this.memory.pin = null;
         throw new LennoxError(ERROR_KINDS.STORAGE, '/data not writable', { notSent: true });
       }
@@ -532,7 +582,7 @@ export class LennoxApp {
    * refused.
    */
   async take(kind, by) {
-    for (let i = 0; i < 5; i += 1) {
+    for (let i = 0; i < 50; i += 1) {
       const current = this.holder;
       if (!current || current.aborted) {
         let release;
@@ -677,9 +727,11 @@ export class LennoxApp {
       }
       this.applyMessages(messages);
       if (messages.length < 10 || until?.()) {
+        this.afterRead();
         return;
       }
     }
+    this.afterRead();
   }
 
   /**
@@ -688,7 +740,7 @@ export class LennoxApp {
    * Never thrown: the change left, its answer is "sent" whatever happens.
    */
   async confirmReads(holder, answerBy, done) {
-    while (!done() && !this.stopsAgain && this.queue.length === 0) {
+    while (!done() && !this.stopsAgain && this.queue.length === 0 && !this.commandWaiting) {
       if (answerBy - this.mono() < TIMINGS.confirmReadMin) return;
       try {
         await this.drain(holder, answerBy, done);
@@ -708,7 +760,11 @@ export class LennoxApp {
     }
     const at = this.mono();
     for (const message of messages) {
-      applyMessage(this.model, message, at);
+      if (applyMessage(this.model, message, at)) {
+        // Message by message: a zone read off ends its stop even when a later
+        // message of the same answer shows it started again (at the thermostat).
+        this.seeOff();
+      }
     }
     const serial = valueOf(this.model.system.serial);
     if (serial && this.session.serial !== serial) {
@@ -717,19 +773,85 @@ export class LennoxApp {
       }
       this.session.serial = serial;
     }
+    if (serial) {
+      this.checkStopsSerial(serial);
+    }
     if (serial && this.memory.serial !== serial) {
       if (this.memory.serial) {
-        // Another thermostat at the address: the stops of the old one are not for this one.
-        this.memory.pendingStops = {};
-        this.memory.stopGivenUp = {};
+        // Another thermostat at the address: the guards of the old one go.
         this.memory.guards = {};
       }
       this.memory.serial = serial;
       this.saveLater();
     }
+    this.seeOff();
+    this.publishAll().catch((err) => this.logger.warn(`Publishing failed: ${err.message}`));
+  }
+
+  /** After every read (with or without messages): the stops and the guards look at it. */
+  afterRead() {
+    this.reads += 1;
     this.watchStops();
     this.watchGuards();
-    this.publishAll().catch((err) => this.logger.warn(`Publishing failed: ${err.message}`));
+  }
+
+  /**
+   * The serial read at the address: the stops kept for it are confirmed (one
+   * that followed the thermostat to a new address goes now), those of
+   * another thermostat are dropped, and said.
+   */
+  checkStopsSerial(serial) {
+    let send = false;
+    for (const [z, p] of Object.entries(this.memory.pendingStops)) {
+      const zone = Number(z);
+      if (p.serial === serial) {
+        if (p.verify) {
+          delete p.verify;
+          send = true;
+        }
+        continue;
+      }
+      delete this.memory.pendingStops[zone];
+      this.memory.stopsDropped[zone] = true;
+      this.logger.warn(
+        `Lennox: another thermostat answers at the address, the off of zone ${zone + 1} is dropped`,
+      );
+      for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) {
+        waiter.resolve(ERRORS.otherThermostat);
+      }
+    }
+    for (const [z, g] of Object.entries(this.memory.stopGivenUp)) {
+      if (g.serial !== serial) delete this.memory.stopGivenUp[z];
+    }
+    this.saveLater();
+    if (send && this.hasUnsentStops()) {
+      this.runStops().catch(() => {});
+    }
+  }
+
+  /**
+   * A zone read off after the click of its stop: the stop is done (a stop
+   * given up too). Messages of another thermostat never end a stop.
+   */
+  seeOff() {
+    const serial = valueOf(this.model.system.serial) ?? this.session.serial ?? this.memory.serial;
+    for (const [z, p] of Object.entries(this.memory.pendingStops)) {
+      const zone = Number(z);
+      if (p.serial !== serial || (p.verify && this.session.serial !== p.serial)) continue;
+      const mode = this.model.zones.get(zone)?.period.systemMode;
+      if (mode?.value === SYSTEM_MODES.OFF && mode.seq > p.clickSeq) {
+        this.logger.info(`Lennox: zone ${zone + 1} reads off`);
+        this.stopDone(zone);
+      }
+    }
+    for (const [z, g] of Object.entries(this.memory.stopGivenUp)) {
+      const mode = this.model.zones.get(Number(z))?.period.systemMode;
+      if (g.serial === serial && mode?.value === SYSTEM_MODES.OFF && mode.seq > (g.seq ?? 0)) {
+        delete this.memory.stopGivenUp[z];
+        this.badge = undefined;
+        this.saveLater();
+      }
+    }
   }
 
   // --- Polling ---------------------------------------------------------------
@@ -742,11 +864,12 @@ export class LennoxApp {
     return this.lastReadAt + this.interval;
   }
 
-  async markRead(mono) {
+  /** The start of a read; /data written in the background (a slow /data never holds a read). */
+  markRead(mono) {
     this.lastReadAt = mono;
     if (!(mono - this.memory.lastReadAt < TIMINGS.lastReadSave)) {
       this.memory.lastReadAt = mono;
-      await this.saveMemory();
+      this.saveLater();
     }
   }
 
@@ -812,7 +935,7 @@ export class LennoxApp {
       this.schedule(this.busy ? this.interval : this.readDue - mono);
       return;
     }
-    await this.markRead(mono);
+    this.markRead(mono);
     if (generation !== this.generation) return;
     let delay;
     let holder;
@@ -849,10 +972,9 @@ export class LennoxApp {
     const r = this.reader;
     const reason = reasonOf(err);
     r.online = false;
-    if (err.kind !== ERROR_KINDS.CERTIFICATE && err.kind !== ERROR_KINDS.STORAGE) {
-      // The thermostat may have restarted: a new session at the next read.
-      this.session.connected = false;
-    }
+    // The session is kept (a silence, a 5xx or a 429 leave the queue readable):
+    // only a 4xx of the queue opens a new one (drain), so the numbers of the
+    // messages, and what a stop sent before saw, go on.
     if (err.kind === ERROR_KINDS.CERTIFICATE || err.kind === ERROR_KINDS.STORAGE) {
       r.error = err.kind;
       r.wait = this.interval;
@@ -863,7 +985,7 @@ export class LennoxApp {
       (err.kind === ERROR_KINDS.HTTP && err.status >= 500)
     ) {
       r.online = true;
-      await this.pauseFor(err);
+      this.pauseFor(err);
       this.logger.warn(`Lennox: ${reason}, pause`);
       return undefined;
     }
@@ -880,7 +1002,7 @@ export class LennoxApp {
   }
 
   /** A 429 or a 5xx: every path waits but the stops, kept in /data. */
-  async pauseFor(err) {
+  pauseFor(err) {
     const wait = Math.min(
       TIMINGS.rateLimitMax,
       Math.max(TIMINGS.rateLimitMin, err.retryAfter ?? TIMINGS.rateLimitDefault),
@@ -889,7 +1011,8 @@ export class LennoxApp {
       until: Math.max(this.memory.pause?.until ?? -Infinity, this.mono() + wait),
       reason: err.kind === ERROR_KINDS.RATE_LIMITED && err.status === 429 ? '429' : '5xx',
     };
-    await this.saveMemory();
+    // Never waited for: the next read and the stops are armed whatever /data does.
+    this.saveLater();
   }
 
   /** Spaced reads after a change: its effect, then a check. */
@@ -922,14 +1045,24 @@ export class LennoxApp {
 
   /** The text of the stops kept or given up, if any. */
   stopsText() {
-    const pending = Object.keys(this.memory.pendingStops);
-    const givenUp = Object.entries(this.memory.stopGivenUp);
     const parts = [];
-    if (pending.length > 0) {
-      parts.push(T.pendingStop(pending.map((z) => this.zoneName(Number(z))).join(', ')));
+    const groups = { unsent: [], awaiting: [], verify: [] };
+    for (const [z, p] of Object.entries(this.memory.pendingStops)) {
+      const name = this.zoneName(Number(z));
+      if (p.verify) groups.verify.push(name);
+      else if (p.state === 'awaiting') groups.awaiting.push(name);
+      else if (p.refusal) parts.push(T.stopRefused(name, p.refusal.status));
+      else groups.unsent.push(name);
     }
-    for (const [z, g] of givenUp) {
+    if (groups.unsent.length > 0) parts.push(T.pendingStop(groups.unsent.join(', ')));
+    if (groups.awaiting.length > 0) parts.push(T.awaitingStop(groups.awaiting.join(', ')));
+    if (groups.verify.length > 0) parts.push(T.verifyStop(groups.verify.join(', ')));
+    for (const [z, g] of Object.entries(this.memory.stopGivenUp)) {
       parts.push(T.stopGivenUp(this.zoneName(Number(z)), g.status));
+    }
+    const dropped = Object.keys(this.memory.stopsDropped);
+    if (dropped.length > 0) {
+      parts.push(T.stopDropped(dropped.map((z) => this.zoneName(Number(z))).join(', ')));
     }
     return parts.reduce((a, b) => (a ? join(a, b) : b), undefined);
   }
@@ -1214,6 +1347,7 @@ export class LennoxApp {
     this.memory.lastReadAt = -Infinity;
     this.lastReadAt = -Infinity;
     this.reader.error = undefined;
+    this.reader.online = undefined;
     this.session = newSession();
     await this.saveMemory();
     this.logger.info('Lennox: the new certificate of the thermostat was trusted by the user');
@@ -1306,6 +1440,8 @@ export class LennoxApp {
     }
     this.guardsDelete(zone);
     delete this.memory.stopGivenUp[zone];
+    delete this.memory.stopsDropped[zone];
+    const old = this.memory.pendingStops[zone];
     this.memory.pendingStops[zone] = {
       serial,
       at: mono,
@@ -1317,6 +1453,8 @@ export class LennoxApp {
       sentSeq: this.model.seq,
       clickSeq: this.model.seq,
       clicked: received,
+      // A stop that still waits for the serial of a new address keeps waiting for it.
+      ...(old?.verify && old.serial === serial ? { verify: true } : {}),
     };
     this.badge = undefined;
     this.saveLater();
@@ -1351,7 +1489,17 @@ export class LennoxApp {
           const pending = this.memory.pendingStops[zone];
           if (!pending) {
             const givenUp = this.memory.stopGivenUp[zone];
-            done(givenUp ? ERRORS.stopGivenUp(givenUp.status) : ERRORS.stopEnded);
+            done(
+              givenUp
+                ? ERRORS.stopGivenUp(givenUp.status)
+                : this.memory.stopsDropped[zone]
+                  ? ERRORS.otherThermostat
+                  : ERRORS.stopEnded,
+            );
+          } else if (pending.verify) {
+            done(ERRORS.stopVerify);
+          } else if (pending.refusal) {
+            done(ERRORS.stopRefusedKept(pending.refusal.status));
           } else if (pending.state === 'awaiting') {
             done(ERRORS.stopSentUnconfirmed);
           } else {
@@ -1432,11 +1580,15 @@ export class LennoxApp {
     const serial = this.session.serial ?? this.memory.serial;
     const due = Object.entries(this.memory.pendingStops)
       .filter(([, p]) => p.state === 'unsent' && (p.clicked !== undefined || mono >= p.notBefore))
+      // At a new address, only once it showed the serial of the stop.
+      .filter(([, p]) => !p.verify || this.session.serial === p.serial)
+      // A newer mode of the zone under way: it ends the stop if accepted, else the stop goes after it.
+      .filter(
+        ([z, p]) =>
+          p.clicked !== undefined || this.inFlight.get(Number(z))?.change.mode === undefined,
+      )
       .map(([z, p]) => [Number(z), p]);
-    // Stops of another thermostat (read meanwhile) are not sent: dropped.
-    for (const [zone, p] of due) {
-      if (serial && p.serial !== serial) delete this.memory.pendingStops[zone];
-    }
+    // Stops of another thermostat (read meanwhile) are never sent (checkStopsSerial drops them).
     const zones = due.filter(([, p]) => !serial || p.serial === serial).map(([z]) => z);
     if (zones.length === 0 || !this.address()) return;
     const clicks = zones
@@ -1457,7 +1609,11 @@ export class LennoxApp {
         const beforeSend = () => {
           for (const zone of zones) {
             const p = this.memory.pendingStops[zone];
-            if (!p || !this.isTarget(p.serial, true)) {
+            if (
+              !p ||
+              !this.isTarget(p.serial, true) ||
+              (p.verify && this.session.serial !== p.serial)
+            ) {
               throw this.refusal(ERRORS.otherThermostat);
             }
           }
@@ -1507,6 +1663,7 @@ export class LennoxApp {
         }
         this.saveLater();
         this.followUp();
+        this.armStopCheck();
         // The read that may show it, if time allows and no other stop waits.
         await this.confirmReads(holder, answerBy, () =>
           zones.every((z) => !this.memory.pendingStops[z]),
@@ -1552,7 +1709,7 @@ export class LennoxApp {
     const answered =
       err.kind === ERROR_KINDS.RATE_LIMITED || (err.kind === ERROR_KINDS.HTTP && err.status >= 500);
     if (answered) {
-      this.pauseFor(err).catch(() => {});
+      this.pauseFor(err);
     }
     for (const zone of zones) {
       const p = this.memory.pendingStops[zone];
@@ -1590,7 +1747,6 @@ export class LennoxApp {
       this.reader.online = false;
       this.reader.error = ERROR_KINDS.UNREACHABLE;
       this.reader.wait = this.reader.wait ?? this.interval;
-      this.session.connected = false;
     }
     this.logger.warn(`Lennox: off not applied (${reason}), kept to be sent again`);
     this.badge = undefined;
@@ -1599,51 +1755,116 @@ export class LennoxApp {
   }
 
   /**
-   * The reads seen by the stops kept: the zone read off after the click is
-   * done; a stop accepted then read not off (5 s after it at least) is sent
-   * again, 3 accepted sends at most, then given up.
+   * After a read, the stops accepted and not read off yet: read not off 5 s
+   * after the send (in this process), the stop is sent again, 3 accepted
+   * sends at most, then given up. A stop accepted before a restart (what the
+   * thermostat showed since is unknown) is ended when two reads in a row show
+   * the zone running: a change made at the thermostat or in the Lennox app is
+   * never fought.
    */
   watchStops() {
     const serial = this.session.serial;
     const mono = this.mono();
     let again = false;
+    let changed = false;
     for (const [z, p] of Object.entries(this.memory.pendingStops)) {
       const zone = Number(z);
-      if (serial && p.serial !== serial) continue;
+      if (!serial || p.serial !== serial || p.state !== 'awaiting') continue;
       const mode = this.model.zones.get(zone)?.period.systemMode;
-      if (!mode) continue;
-      if (mode.value === SYSTEM_MODES.OFF && mode.seq > Math.min(p.clickSeq, p.sentSeq)) {
-        this.logger.info(`Lennox: zone ${zone + 1} reads off`);
-        this.stopDone(zone);
+      if (!mode || mode.value === SYSTEM_MODES.OFF) continue;
+      if (p.restored) {
+        if (p.onRead === undefined) {
+          p.onRead = this.reads;
+          changed = true;
+        } else if (this.reads > p.onRead) {
+          delete this.memory.pendingStops[zone];
+          changed = true;
+          this.logger.warn(
+            `Lennox: zone ${zone + 1} read running twice after a restart: off accepted before it, changed at the thermostat since, not sent again`,
+          );
+          for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) {
+            waiter.resolve(ERRORS.stopEnded);
+          }
+        }
         continue;
       }
-      if (
-        p.state === 'awaiting' &&
-        mode.value !== SYSTEM_MODES.OFF &&
-        mode.seq > p.sentSeq &&
-        mono - p.sentAt >= STOP_GRACE
-      ) {
-        if (p.accepted >= TIMINGS.stopRefusalsMax) {
-          delete this.memory.pendingStops[zone];
-          this.memory.stopGivenUp[zone] = { serial: p.serial, status: 'not applied' };
-          this.logger.warn(
-            `Lennox: off of zone ${zone + 1} accepted ${p.accepted} times, never read off: given up`,
-          );
-          this.badge = undefined;
-          for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) {
-            waiter.resolve(ERRORS.stopGivenUp('not applied'));
-          }
-          continue;
+      if (mode.seq <= p.sentSeq || mono - p.sentAt < STOP_GRACE) continue;
+      changed = true;
+      if (p.accepted >= TIMINGS.stopRefusalsMax) {
+        delete this.memory.pendingStops[zone];
+        this.memory.stopGivenUp[zone] = {
+          serial: p.serial,
+          status: 'not applied',
+          seq: this.model.seq,
+        };
+        this.logger.warn(
+          `Lennox: off of zone ${zone + 1} accepted ${p.accepted} times, never read off: given up`,
+        );
+        this.badge = undefined;
+        for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) {
+          waiter.resolve(ERRORS.stopGivenUp('not applied'));
         }
-        this.logger.warn(`Lennox: zone ${zone + 1} not off after an accepted off, sent again`);
-        p.state = 'unsent';
-        p.notBefore = -Infinity;
-        again = true;
+        continue;
       }
+      this.logger.warn(`Lennox: zone ${zone + 1} not off after an accepted off, sent again`);
+      p.state = 'unsent';
+      p.notBefore = -Infinity;
+      again = true;
     }
-    this.saveLater();
+    if (changed) this.saveLater();
     if (again) {
       this.runStops().catch(() => {});
+    }
+  }
+
+  /**
+   * A read for the stops accepted and not read off yet: after their grace,
+   * then every 30 s while one waits, whatever the pause of the reads (a
+   * stop never waits for a 429 or a 5xx to be checked).
+   */
+  armStopCheck(delay = TIMINGS.stopCheck) {
+    if (this.checkTimer) this.timers.clearTimeout(this.checkTimer);
+    const generation = this.generation;
+    this.checkTimer = this.timers.setTimeout(
+      () => {
+        this.checkTimer = undefined;
+        if (generation !== this.generation) return;
+        this.checkStops()
+          .catch(() => {})
+          .finally(() => {
+            const waiting = Object.values(this.memory.pendingStops).some(
+              (p) => p.state === 'awaiting',
+            );
+            if (generation === this.generation && waiting && !this.checkTimer) {
+              this.armStopCheck(TIMINGS.pendingStopRetry);
+            }
+          });
+      },
+      Math.max(0, delay),
+    );
+  }
+
+  async checkStops() {
+    const waiting = Object.values(this.memory.pendingStops).some((p) => p.state === 'awaiting');
+    if (!waiting || !this.address() || this.busy) return;
+    const by = this.mono() + 2 * TIMINGS.readTimeout;
+    const holder = await this.take(KIND.STOP, by);
+    try {
+      if (!this.session.connected) await this.connectSession(holder, by, true);
+      // Everything asked again: the queue sends changes only, and a stop
+      // ignored by the thermostat changes nothing; the full state shows it.
+      const answer = await this.request(holder, {
+        method: 'POST',
+        path: PATHS.requestData,
+        body: requestDataBody(),
+        by,
+        protective: true,
+      });
+      checkAccepted(answer);
+      this.session.subscribedAt = this.mono();
+      await this.drain(holder, by);
+    } finally {
+      holder.release();
     }
   }
 
@@ -1673,8 +1894,8 @@ export class LennoxApp {
     this.inFlight.set(zone, entry);
     this.queue.push(entry);
     if (!this.roundRunning) {
-      // The next turn: commands clicked together (a scene) share the round.
-      this.roundRunning = sleep(this.timers, 0)
+      // A short window: commands clicked together (a scene) share the round.
+      this.roundRunning = sleep(this.timers, TIMINGS.gather)
         .then(() => this.runRounds())
         .finally(() => {
           this.roundRunning = undefined;
@@ -1693,6 +1914,8 @@ export class LennoxApp {
       await this.round(entries).catch((err) => {
         for (const e of entries) e.reject(err);
       });
+      // A stop that waited for a mode of its zone (refused or unanswered) goes now.
+      if (this.hasUnsentStops() && !this.stopsRunning) this.runStops().catch(() => {});
     }
   }
 
@@ -1737,8 +1960,11 @@ export class LennoxApp {
       if (value === undefined) return { error: ERRORS.missing };
       full[key] = value;
     }
+    const period = { ...full, ...fields };
+    // Every value taken back from the period read is bounded too.
+    if (!periodWithin(zone, period)) return { error: ERRORS.readOutOfRange };
     return {
-      schedules: [periodPart(SCHEDULE.override(z), { ...full, ...fields })],
+      schedules: [periodPart(SCHEDULE.override(z), period)],
       zones: [holdPart(z)],
     };
   }
@@ -1795,6 +2021,7 @@ export class LennoxApp {
       );
     }
     if (planned.error === 'deadband') throw this.refusal(ERRORS.deadband);
+    if (planned.error === 'read') throw this.refusal(ERRORS.readOutOfRange);
     if (planned.error) throw this.refusal(ERRORS.missing);
     if (planned.same) return { same: true };
     const parts = this.targetParts(zone, planned.fields);
@@ -1828,7 +2055,13 @@ export class LennoxApp {
         }
       });
       if (entries.length === 0) return;
-      holder = await this.take(KIND.COMMAND, sendBy - TIMINGS.commandMinSend);
+      // Said to a stop reading its confirmation: it gives the link up at once.
+      this.commandWaiting = true;
+      try {
+        holder = await this.take(KIND.COMMAND, sendBy - TIMINGS.commandMinSend);
+      } finally {
+        this.commandWaiting = false;
+      }
       if (!this.session.connected || this.session.serial === undefined) {
         throw this.refusal(ERRORS.notReadYet);
       }
@@ -1853,7 +2086,8 @@ export class LennoxApp {
       for (const e of live) {
         this.memory.guards[e.zone] = { expect: e.plan.expect, until, sentSeq: this.model.seq };
       }
-      if (!(await this.saveMemory())) {
+      // Bounded by the time to send: a slow /data refuses, never holds the link.
+      if (!(await this.saveWithin(sendBy - TIMINGS.commandMinSend - this.mono()))) {
         for (const e of live) delete this.memory.guards[e.zone];
         throw this.refusal(ERRORS.storageWrite);
       }
@@ -1876,6 +2110,7 @@ export class LennoxApp {
         });
         checkPublished(answer);
       }
+      this.modesAccepted(live);
       const confirmed = () => live.every((e) => this.shows(e));
       await this.confirmReads(holder, answerBy, confirmed);
       for (const e of live) {
@@ -1883,7 +2118,9 @@ export class LennoxApp {
           delete this.memory.guards[e.zone];
           e.resolve();
         } else {
-          e.reject(this.refusal(this.before(e) ? ERRORS.notYetApplied : ERRORS.sentUnconfirmed));
+          // Not seen yet (the link went to the next round): answered by a
+          // later read until the answer time, then "not confirmed".
+          this.awaitShown(e, answerBy);
         }
       }
       this.saveLater();
@@ -1913,7 +2150,7 @@ export class LennoxApp {
         err.kind === ERROR_KINDS.RATE_LIMITED ||
         (err.kind === ERROR_KINDS.HTTP && err.status >= 500)
       ) {
-        await this.pauseFor(err);
+        this.pauseFor(err);
       }
       if (live.some((e) => e.sentAt !== undefined)) this.followUp();
       this.saveLater();
@@ -1930,12 +2167,22 @@ export class LennoxApp {
       e.sentSeq = this.model.seq;
       const guard = this.memory.guards[e.zone];
       if (guard) guard.sentSeq = e.sentSeq;
-      if (e.change.mode !== undefined && this.memory.pendingStops[e.zone]) {
-        // A newer mode that left Gladys (a click with the option) ends the stop kept.
-        delete this.memory.pendingStops[e.zone];
-        for (const waiter of [...(this.stopWaiters.get(e.zone) ?? [])]) {
-          waiter.resolve(ERRORS.stopEnded);
-        }
+    }
+    this.saveLater();
+  }
+
+  /**
+   * A newer mode accepted by the thermostat (a click with the option) ends the
+   * stop kept for its zone, if that stop was clicked before it; a mode
+   * refused (a 4xx, a code other than 1, a 429) or unanswered leaves it.
+   */
+  modesAccepted(live) {
+    for (const e of live) {
+      const p = this.memory.pendingStops[e.zone];
+      if (e.change.mode === undefined || !p || p.at > e.received) continue;
+      delete this.memory.pendingStops[e.zone];
+      for (const waiter of [...(this.stopWaiters.get(e.zone) ?? [])]) {
+        waiter.resolve(ERRORS.stopEnded);
       }
     }
     this.saveLater();
@@ -1972,8 +2219,29 @@ export class LennoxApp {
     }
   }
 
+  /** A command sent, answered by the first read showing it, or at `answerBy`. */
+  awaitShown(e, answerBy) {
+    const waiter = { e };
+    waiter.timer = this.timers.setTimeout(
+      () => {
+        this.shownWaiters.delete(waiter);
+        e.reject(this.refusal(this.before(e) ? ERRORS.notYetApplied : ERRORS.sentUnconfirmed));
+      },
+      Math.max(0, answerBy - this.mono()),
+    );
+    this.shownWaiters.add(waiter);
+  }
+
   /** A guard is lifted by a read (after its send) showing every value asked. */
   watchGuards() {
+    for (const waiter of [...this.shownWaiters]) {
+      if (this.shows(waiter.e)) {
+        this.timers.clearTimeout(waiter.timer);
+        this.shownWaiters.delete(waiter);
+        delete this.memory.guards[waiter.e.zone];
+        waiter.e.resolve();
+      }
+    }
     for (const [z, guard] of Object.entries(this.memory.guards)) {
       const zone = Number(z);
       if (this.inFlight.has(zone)) continue;

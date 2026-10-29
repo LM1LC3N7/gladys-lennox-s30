@@ -134,6 +134,26 @@ export const T = {
       `Off not applied yet (zone ${zones}): kept and sent again every 30 seconds until the thermostat reads off.`,
       `Arrêt pas encore appliqué (zone ${zones}) : gardé et renvoyé toutes les 30 secondes jusqu'à ce que le thermostat soit lu à l'arrêt.`,
     ),
+  awaitingStop: (zones) =>
+    both(
+      `Off accepted (zone ${zones}), not read off yet: read again, and sent again if a read shows the zone running.`,
+      `Arrêt accepté (zone ${zones}), pas encore lu à l'arrêt : relu, et renvoyé si une lecture montre la zone en marche.`,
+    ),
+  verifyStop: (zones) =>
+    both(
+      `Off kept (zone ${zones}): sent once the new address shows the serial number of the thermostat.`,
+      `Arrêt gardé (zone ${zones}) : envoyé dès que la nouvelle adresse montre le numéro de série du thermostat.`,
+    ),
+  stopRefused: (zone, status) =>
+    both(
+      `Off of zone ${zone} refused by the thermostat (${status}): sent again in 5 minutes, given up after 3 refusals in a row.`,
+      `Arrêt de la zone ${zone} refusé par le thermostat (${status}) : renvoyé dans 5 minutes, abandonné après 3 refus de suite.`,
+    ),
+  stopDropped: (zones) =>
+    both(
+      `Off of zone ${zones} dropped: another thermostat answers at the address.`,
+      `Arrêt de la zone ${zones} retiré : un autre thermostat répond à l'adresse.`,
+    ),
   stopGivenUp: (zone, status) =>
     both(
       `Off of zone ${zone} given up (${status}, 3 times): the zone may still be heating or cooling.`,
@@ -258,6 +278,10 @@ export const ERRORS = {
     'The other setpoint cannot move out of the way within its limits (heating stays below cooling): nothing sent.',
     "L'autre consigne ne peut pas s'écarter dans ses limites (le chauffage reste sous la climatisation) : rien envoyé.",
   ),
+  readOutOfRange: both(
+    'A value read from the thermostat, to be written back, is outside the limits of the zone: nothing sent.',
+    'Une valeur lue sur le thermostat, à réécrire, est hors des limites de la zone : rien envoyé.',
+  ),
   unknownState: (reason) =>
     both(
       `The state of the zone is unknown (${reason}): nothing sent.`,
@@ -275,13 +299,22 @@ export const ERRORS = {
     'Envoyée, sans confirmation pour le moment (relue dans 5 et 20 s).',
   ),
   stopSentUnconfirmed: both(
-    'Off sent and accepted, not read off yet: kept and sent again until the thermostat reads off.',
-    "Arrêt envoyé et accepté, pas encore lu à l'arrêt : gardé et renvoyé jusqu'à ce que le thermostat soit lu à l'arrêt.",
+    'Off sent and accepted, not read off yet: kept, read again, and sent again if a read shows the zone running.',
+    "Arrêt envoyé et accepté, pas encore lu à l'arrêt : gardé, relu, et renvoyé si une lecture montre la zone en marche.",
   ),
   stopKept: (reason) =>
     both(
       `Off not applied yet (${reason}): kept in /data and sent again every 30 s until the thermostat reads off.`,
       `Arrêt pas encore appliqué (${reason}) : gardé dans /data et renvoyé toutes les 30 s jusqu'à ce que le thermostat soit lu à l'arrêt.`,
+    ),
+  stopVerify: both(
+    'Off kept in /data: sent once the new address shows the serial number of the thermostat.',
+    'Arrêt gardé dans /data : envoyé dès que la nouvelle adresse montre le numéro de série du thermostat.',
+  ),
+  stopRefusedKept: (status) =>
+    both(
+      `Off refused by the thermostat (${status}): kept, sent again in 5 minutes, given up after 3 refusals in a row.`,
+      `Arrêt refusé par le thermostat (${status}) : gardé, renvoyé dans 5 minutes, abandonné après 3 refus de suite.`,
     ),
   stopGivenUp: (status) =>
     both(

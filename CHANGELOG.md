@@ -20,5 +20,8 @@ the notes of the version's GitHub Release.
   thermostat reads off; the other modes, the setpoints and the fan mode
   behind an option, off by default.
 - "Test the connection" and "Trust the new certificate" buttons.
+- An Off accepted is checked by its own reads (pause or not) and sent again
+  when the zone still runs; a start at the thermostat after it is never
+  fought; it follows the thermostat to a new address.
 
 [Unreleased]: https://github.com/LM1LC3N7/gladys-lennox-s30/commits/main

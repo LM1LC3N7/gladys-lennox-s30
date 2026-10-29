@@ -44,17 +44,30 @@ demandée par le thermostat, avant la première lecture après un redémarrage, 
 
 Il est **refusé** seulement :
 
-- sans adresse du thermostat (ni dans la configuration, ni dans `/data`) ;
+- sans adresse du thermostat (ni valable dans la configuration, ni dans `/data`) ;
 - quand `/data` ne peut pas être lu (le certificat épinglé est alors inconnu) ;
 - pour un appareil d'un autre thermostat que celui qui répond à l'adresse.
 
-Tant que le thermostat n'est pas lu à l'arrêt, l'arrêt est **gardé dans `/data`** et renvoyé toutes les
-30 secondes (et au redémarrage), sans limite de durée. Il prend fin quand une lecture montre la zone à l'arrêt,
-quand un autre mode de la zone part depuis Gladys (un clic avec l'option), ou si un autre thermostat répond à
-l'adresse. Le thermostat injoignable ou un certificat changé ne comptent pas comme un essai. S'il est refusé
-trois fois de suite par le thermostat, ou accepté trois fois sans jamais être lu à l'arrêt, il est abandonné et
-l'état, le badge de l'appareil et la réponse le disent. En mode absence, il vise le programme manuel, comme
-lennoxs30api (non vérifié sur un vrai thermostat).
+Tant que le thermostat n'est pas lu à l'arrêt, l'arrêt est **gardé dans `/data`**, sans limite de durée :
+
+- pas encore parti (thermostat injoignable, certificat changé, pause demandée) : renvoyé toutes les 30 secondes
+  et au redémarrage ; cela ne compte pas comme un essai ;
+- refusé par le thermostat (un 4xx, une réponse autre que « code 1 ») : renvoyé 5 minutes plus tard, abandonné
+  après trois refus de suite ;
+- accepté : relu 6 secondes après puis toutes les 30 secondes, pause ou non, et renvoyé si une lecture montre
+  la zone en marche 5 secondes ou plus après l'envoi ; abandonné après trois envois acceptés jamais lus à
+  l'arrêt.
+
+Il prend fin quand une lecture montre la zone à l'arrêt après le clic (même si la zone est relancée au
+thermostat juste après : une relance au thermostat ou dans l'application Lennox n'est pas combattue), quand un
+autre mode de la zone, cliqué après lui depuis Gladys (avec l'option), est **accepté** par le thermostat (un
+mode refusé laisse l'arrêt gardé), ou si un autre thermostat répond à l'adresse (dit dans l'état). Un arrêt
+accepté avant un redémarrage du module est terminé si deux lectures de suite après le redémarrage montrent la
+zone en marche (changée au thermostat entre-temps). Une nouvelle adresse saisie garde les arrêts : ils partent
+dès que la nouvelle adresse montre le numéro de série du même thermostat. Un abandon est dit dans l'état, le
+badge de l'appareil et la réponse, jusqu'à une lecture de la zone à l'arrêt ou un nouveau clic. En mode
+absence, l'arrêt vise le programme manuel comme lennoxs30api, alors que le thermostat suit le programme
+d'absence : il risque d'être abandonné après trois envois (non vérifié sur un vrai thermostat).
 
 ### Les autres commandes (option « Autoriser les commandes »)
 
@@ -62,8 +75,9 @@ Désactivées par défaut. Activées : le mode (chauffage, climatisation, les de
 climatisation et le mode du ventilateur.
 
 - Décidées sur la file du thermostat vidée juste après le clic ; refusées si une valeur nécessaire n'a pas été
-  lue, en mode absence, en mode consigne unique, pendant un arrêt en cours de la zone (sauf un mode, qui y met
-  fin) et tant que la commande précédente de la zone n'est pas visible (90 s au plus).
+  lue, en mode absence, pendant un arrêt en cours de la zone (sauf un mode, qui y met
+  fin) et tant que la commande précédente de la zone n'est pas visible (90 s au plus). En mode consigne unique,
+  les consignes sont refusées.
 - Les consignes sont arrondies au pas du thermostat (1 °F, 0,5 °C), l'autre unité est calculée exactement, et
   les deux valeurs doivent rester dans les limites de la zone lues sur le thermostat et dans les nôtres
   (chauffage 40 à 90 °F, climatisation 60 à 99 °F). Si la consigne de chauffage dépasserait la consigne de

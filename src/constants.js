@@ -199,8 +199,10 @@ export const TIMINGS = {
   followUps: [5 * SECOND, 20 * SECOND],
   /** A sent command keeps its guard until the thermostat shows it, or 90 s. */
   guard: 90 * SECOND,
-  /** A stop sent again at most this often while its watch holds (contradicted by a read). */
-  stopReasserts: 2,
-  /** A request given up for a stop: waited for at most this long to close. */
-  preemptWait: 500,
+  /** The first pin written to /data before a read: waited for this long at most. */
+  saveWait: SECOND,
+  /** A read of the zones of the stops accepted, this long after them, then at their rhythm (pause or not). */
+  stopCheck: 6 * SECOND,
+  /** Commands (and stops) clicked within this window go in one round (a scene). */
+  gather: 100,
 };

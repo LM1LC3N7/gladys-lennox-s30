@@ -8,9 +8,10 @@
 //     any configuration or read;
 //   - the end of a pause (429, 5xx), the time of the last read (written at
 //     most once a minute): a restart never asks sooner;
-//   - the stops not applied yet (sent again after a restart), those given up
-//     (said until a read shows the zone off or a click), the guards of the
-//     commands sent and not seen yet.
+//   - the stops not applied yet (sent again after a restart; they follow the
+//     thermostat to a new address), those given up (said until a read shows
+//     the zone off or a click), the guards of the commands sent and not seen
+//     yet.
 // The local API takes no credential: there is no secret to keep. The file is
 // readable by the container user only (0600).
 //
@@ -96,6 +97,8 @@ export const emptyMemory = () => ({
   pendingStops: {},
   /** zone -> { serial, status } */
   stopGivenUp: {},
+  /** zone -> true: a stop dropped because another thermostat answers (said until a click; memory only). */
+  stopsDropped: {},
   /** zone -> { expect, until, sentSeq } */
   guards: {},
 });
@@ -119,8 +122,14 @@ export function toDisk(memory, { mono, now }) {
       refusal: p.refusal,
       notBefore: wall(p.notBefore),
       sentAt: wall(p.sentAt),
+      ...(p.verify ? { verify: true } : {}),
     })),
-    stopGivenUp: memory.stopGivenUp,
+    stopGivenUp: Object.fromEntries(
+      Object.entries(memory.stopGivenUp).map(([z, g]) => [
+        z,
+        { serial: g.serial, status: g.status },
+      ]),
+    ),
     guards: map(memory.guards, (g) => ({ expect: g.expect, until: wall(g.until) })),
   };
 }
@@ -177,6 +186,10 @@ export function fromDisk(raw, { mono, now }) {
       sentAt: past(p.sentAt),
       sentSeq: 0,
       clickSeq: 0,
+      // Accepted before the restart: what the thermostat showed since is unknown.
+      ...(p.state === 'awaiting' ? { restored: true } : {}),
+      // Kept from another address: sent once the address shows its serial.
+      ...(p.verify === true ? { verify: true } : {}),
     };
   }
   for (const [z, g] of Object.entries(plain(data.stopGivenUp) ? data.stopGivenUp : {})) {

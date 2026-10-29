@@ -215,17 +215,13 @@ test('Off accepted but read not off: sent again, 3 accepted sends at most, never
   assert.equal(ack.success, false);
   assert.match(ack.error, /accepté/);
   assert.equal(store.data.pendingStops['0'].state, 'awaiting');
-  // No read shows anything: nothing sent again (it was accepted).
-  await advance(60 * SECOND);
-  assert.equal(publishes(lennox).length, 1);
-  // A read shows the zone still heating: sent again.
-  lennox.change(0, { systemMode: 'heat' });
-  await advance(15 * SECOND);
+  // The check reads (everything asked again, 6 s after, then every 30 s)
+  // show the zone still heating: sent again, 3 accepted sends at most.
+  await advance(10 * SECOND);
   assert.equal(publishes(lennox).length, 2);
-  lennox.change(0, { systemMode: 'heat' });
-  await advance(15 * SECOND);
-  lennox.change(0, { systemMode: 'heat' });
-  await advance(15 * SECOND);
+  await advance(2 * 60 * SECOND);
+  assert.equal(publishes(lennox).length, 3);
+  await advance(10 * 60 * SECOND, 10 * SECOND);
   assert.equal(publishes(lennox).length, 3);
   assert.equal(store.data.stopGivenUp['0'].status, 'not applied');
 });
@@ -474,7 +470,9 @@ test('the thermostat gone: unreachable, no old value published as new; back: a n
   lennox.fail = {};
   lennox.requests.length = 0;
   await advance(5 * 60 * SECOND);
-  assert.deepEqual(lennox.routes().slice(0, 3), FIRST_READ);
+  // The session is kept (the queue stays readable): no Connect, the numbers go on.
+  assert.equal(lennox.count('POST /Endpoints/gladys/Connect'), 0);
+  assert.ok(lennox.count('GET /Messages/gladys/Retrieve') >= 1);
   assert.match(message(gladys).en, /^Connected/);
 });
 
@@ -561,9 +559,8 @@ test('a setpoint during an Off kept: refused on arrival, and again right before 
   await press(1, F.MODE, OFF);
   lennox.requests.length = 0;
   assert.match((await press(1, F.COOL_SETPOINT, 80)).error, /arrêt de cette zone est en cours/);
-  // Only the reads of the interval: the command itself read nothing.
-  assert.ok(lennox.routes().every((r) => r === 'GET /Messages/gladys/Retrieve'));
-  assert.ok(lennox.count('GET /Messages/gladys/Retrieve') <= 1);
+  // Only the Off sent again (contradicted by its check reads): the command itself sent nothing.
+  assert.ok(publishes(lennox).every((p) => periodOf(p)?.systemMode === 'off'));
   // An Off kept appearing while a setpoint of another zone reads (from /data, a
   // restart of the stop sender): that setpoint is refused before its bytes.
   lennox.latency = 300;
