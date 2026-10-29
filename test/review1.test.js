@@ -112,15 +112,19 @@ test('I1: a start at the thermostat right after the Off is read (same answer) is
   assert.equal(lennox.state.zones[0].period.systemMode, 'heat');
 });
 
-test('I1: an Off accepted before a restart, the zone started at the thermostat: ended after two reads', async (t) => {
+async function restartAfterAcceptedOff(t, relaunch) {
   const store = memoryStore();
   const first = await setup(t, { store });
+  await first.advance(15 * SECOND);
+  first.lennox.ignorePublish = true;
   first.lennox.fail['GET /Messages/gladys/Retrieve'] = 502;
   await first.press(0, F.MODE, OFF);
   assert.equal(store.data.pendingStops['0'].state, 'awaiting');
+  assert.equal(store.data.pendingStops['0'].from, 'heat');
   first.app.halt();
+  first.lennox.ignorePublish = false;
   delete first.lennox.fail['GET /Messages/gladys/Retrieve'];
-  first.lennox.change(0, { systemMode: 'heat' });
+  if (relaunch) first.lennox.change(0, { systemMode: relaunch });
   first.lennox.queue = undefined;
   const again = await setup(t, {
     store,
@@ -129,10 +133,23 @@ test('I1: an Off accepted before a restart, the zone started at the thermostat: 
     create: false,
     devices: first.gladys.fake.devices,
   });
+  return { first, again, store };
+}
+
+test('B4: an Off accepted, ignored, then a restart: the zone still in its mode of the click, sent again', async (t) => {
+  const { first, again } = await restartAfterAcceptedOff(t);
+  await again.advance(60 * SECOND);
+  assert.ok(offs(first.lennox) >= 2, `sent again: ${offs(first.lennox)}`);
+  assert.equal(first.lennox.state.zones[0].period.systemMode, 'off');
+});
+
+test('B4: an Off accepted before a restart, the zone then in ANOTHER mode read twice: lifted and said', async (t) => {
+  const { first, again, store } = await restartAfterAcceptedOff(t, 'cool');
   await again.advance(3 * 60 * SECOND);
   assert.equal(offs(first.lennox), 1);
-  assert.equal(first.lennox.state.zones[0].period.systemMode, 'heat');
+  assert.equal(first.lennox.state.zones[0].period.systemMode, 'cool');
   assert.deepEqual(store.data.pendingStops, {});
+  assert.match(message(again.gladys).en, /another mode than at the click/);
 });
 
 test('I2: a newer mode refused leaves the Off kept; accepted, it ends it', async (t) => {
@@ -358,4 +375,145 @@ test('the first pin with /data frozen: the reads give up after 1 s, never hang',
   assert.equal(lennox.count('GET /Messages/gladys/Retrieve'), 0);
   assert.equal(app.reader.running, undefined);
   assert.match(message(gladys).en, /could not be kept in \/data/);
+});
+
+test('B5: a 4xx of RequestData opens a new session (the thermostat restarted)', async (t) => {
+  const { lennox, advance, app, press } = await setup(t);
+  lennox.fail['GET /Messages/gladys/Retrieve'] = 'drop';
+  await advance(40 * SECOND);
+  delete lennox.fail['GET /Messages/gladys/Retrieve'];
+  lennox.queue = undefined;
+  const connects = lennox.count('POST /Endpoints/gladys/Connect');
+  await advance(4 * 60 * SECOND);
+  assert.ok(lennox.count('POST /Endpoints/gladys/Connect') > connects);
+  assert.equal(app.reader.online, true);
+  assert.equal((await press(0, F.MODE, OFF)).success, true);
+});
+
+test('B5: an Off answered by a 4xx: a new session and the Off again before a refusal counts', async (t) => {
+  const { lennox, press, store } = await setup(t);
+  let first = true;
+  lennox.fail['POST /Messages/Publish'] = (json) => {
+    if (first) {
+      first = false;
+      return { status: 404, headers: {}, body: '' };
+    }
+    lennox.applyNow(json.Data);
+    return { status: 200, headers: {}, body: '{"code":1}' };
+  };
+  const connects = lennox.count('POST /Endpoints/gladys/Connect');
+  assert.equal((await press(0, F.MODE, OFF)).success, true);
+  assert.equal(lennox.count('POST /Endpoints/gladys/Connect'), connects + 1);
+  assert.deepEqual(store.data.pendingStops, {});
+});
+
+test('I1: an Off clicked takes the link from the check of another Off that hangs', async (t) => {
+  const { lennox, send, advance, app } = await setup(t);
+  ignoreOff(lennox);
+  const first = send(0, F.MODE, OFF);
+  await advance(200, 50);
+  lennox.fail['POST /Messages/RequestData'] = 'silent';
+  await advance(6 * SECOND, 100);
+  assert.equal(app.holder?.kind, 'check');
+  delete lennox.fail['POST /Messages/Publish'];
+  const ack = send(1, F.MODE, OFF);
+  await advance(5 * SECOND, 50);
+  assert.equal((await ack).success, true);
+  assert.equal(lennox.state.zones[1].period.systemMode, 'off');
+  await first;
+});
+
+test('I2: an off queued before the click, then the zone running again: the Off never sent is not ended', async (t) => {
+  const { lennox, press, advance, store } = await setup(t);
+  lennox.change(0, { systemMode: 'off' });
+  lennox.change(0, { systemMode: 'heat' });
+  lennox.fail['POST /Messages/Publish'] = 'drop';
+  await press(0, F.MODE, OFF);
+  delete lennox.fail['POST /Messages/Publish'];
+  await advance(2 * 60 * SECOND);
+  assert.equal(lennox.state.zones[0].period.systemMode, 'off');
+  assert.deepEqual(store.data.pendingStops, {});
+});
+
+test('I3: a kept Off waits for a mode of its zone on its way; that mode accepted, it never goes', async (t) => {
+  const { lennox, send, advance, app } = await setup(t, { config: ALLOWED });
+  app.memory.pendingStops[0] = {
+    serial: SERIAL_ID,
+    at: app.mono(),
+    state: 'unsent',
+    accepted: 0,
+    refusal: null,
+    notBefore: -Infinity,
+    sentAt: -Infinity,
+    sentSeq: app.model.seq,
+    clickSeq: app.model.seq,
+  };
+  lennox.latency = 300;
+  const cool = send(0, F.MODE, THERMOSTAT_MODE.COOLING);
+  await advance(100 + 300 + 100, 10);
+  app.runStops().catch(() => {});
+  await advance(5 * SECOND, 50);
+  assert.equal((await cool).success, true);
+  assert.equal(offs(lennox), 0);
+  assert.equal(app.memory.pendingStops[0], undefined);
+});
+
+test('I3: a /data that never answers refuses a command within its time, never hangs it', async (t) => {
+  const { lennox, send, advance, store } = await setup(t, { config: ALLOWED });
+  store.hold = new Promise(() => {});
+  let answer;
+  send(0, F.HEAT_SETPOINT, 70).then((a) => {
+    answer = a;
+  });
+  await advance(5 * SECOND, 50);
+  assert.ok(answer, 'answered within 5 s');
+  assert.match(answer.error, /\/data ne peut pas être écrit/);
+  assert.equal(publishes(lennox).length, 0);
+});
+
+test('m13: a newer mode sent without an answer ends the Off kept before it', async (t) => {
+  const { lennox, press, store } = await setup(t, { config: ALLOWED });
+  ignoreOff(lennox);
+  await press(0, F.MODE, OFF);
+  assert.ok(store.data.pendingStops['0']);
+  lennox.fail['POST /Messages/Publish'] = 'drop';
+  await press(0, F.MODE, THERMOSTAT_MODE.HEATING);
+  assert.deepEqual(store.data.pendingStops, {});
+});
+
+test('B4: another mode read twice LESS than an interval apart does not lift the Off', async (t) => {
+  const store = memoryStore({
+    target: '192.168.1.60',
+    serial: SERIAL_ID,
+    pin: FP,
+    pendingStops: {
+      0: {
+        serial: SERIAL_ID,
+        at: NOW - 1000,
+        state: 'awaiting',
+        accepted: 1,
+        sentAt: NOW - 900,
+        from: 'cool',
+      },
+    },
+  });
+  const { app, advance } = await setup(t, { store });
+  await app.tick({ followUp: true });
+  assert.ok(app.memory.pendingStops[0], 'two reads within an interval: kept');
+  await advance(25 * SECOND);
+  assert.equal(app.memory.pendingStops[0], undefined, 'an interval later: lifted');
+});
+
+test('I1: a command takes the link from the check of an Off that hangs', async (t) => {
+  const { lennox, send, advance, app } = await setup(t, { config: ALLOWED });
+  ignoreOff(lennox);
+  const off = send(0, F.MODE, OFF);
+  await advance(200, 50);
+  lennox.fail['POST /Messages/RequestData'] = 'silent';
+  await advance(6 * SECOND, 100);
+  assert.equal(app.holder?.kind, 'check');
+  const set = send(1, F.COOL_SETPOINT, 80);
+  await advance(5 * SECOND, 50);
+  assert.equal((await set).success, true, (await set).error);
+  await off;
 });

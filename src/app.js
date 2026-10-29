@@ -89,7 +89,7 @@ const join = (a, b) => both(`${a.en} ${b.en}`, `${a.fr} ${b.fr}`);
 const sleep = (timers, ms) => new Promise((resolve) => timers.setTimeout(resolve, ms));
 
 /** The kinds of holders of the link, by priority. */
-const KIND = { POLL: 'poll', COMMAND: 'command', STOP: 'stop' };
+const KIND = { POLL: 'poll', CHECK: 'check', COMMAND: 'command', STOP: 'stop' };
 
 /** A read showing the zone not off this long after an accepted stop contradicts it. */
 const STOP_GRACE = 5 * SECOND;
@@ -603,7 +603,7 @@ export class LennoxApp {
       }
       const preempt =
         (kind === KIND.STOP && current.kind !== KIND.STOP) ||
-        (kind === KIND.COMMAND && current.kind === KIND.POLL);
+        (kind === KIND.COMMAND && (current.kind === KIND.POLL || current.kind === KIND.CHECK));
       if (preempt) {
         this.abort(current);
         continue;
@@ -676,7 +676,7 @@ export class LennoxApp {
       by,
       protective,
     });
-    checkAccepted(answer);
+    this.acceptedOrNewSession(answer);
     this.session = { connected: true, serial: undefined, subscribedAt: -Infinity };
     this.model = emptyModel(this.model.seq);
   }
@@ -693,10 +693,24 @@ export class LennoxApp {
         body: requestDataBody(),
         by,
       });
-      checkAccepted(answer);
+      this.acceptedOrNewSession(answer);
       this.session.subscribedAt = this.mono();
     }
     await this.drain(holder, by);
+  }
+
+  /**
+   * A 4xx of Connect, RequestData or Publish: the queue of our application
+   * id is gone (the thermostat restarted): the next request opens a new
+   * session. Throws as checkAccepted.
+   */
+  acceptedOrNewSession(answer) {
+    try {
+      checkAccepted(answer);
+    } catch (err) {
+      if (err.kind === ERROR_KINDS.REJECTED) this.session.connected = false;
+      throw err;
+    }
   }
 
   /**
@@ -763,7 +777,7 @@ export class LennoxApp {
       if (applyMessage(this.model, message, at)) {
         // Message by message: a zone read off ends its stop even when a later
         // message of the same answer shows it started again (at the thermostat).
-        this.seeOff();
+        this.seeOff(false);
       }
     }
     const serial = valueOf(this.model.system.serial);
@@ -784,7 +798,7 @@ export class LennoxApp {
       this.memory.serial = serial;
       this.saveLater();
     }
-    this.seeOff();
+    this.seeOff(true);
     this.publishAll().catch((err) => this.logger.warn(`Publishing failed: ${err.message}`));
   }
 
@@ -833,13 +847,20 @@ export class LennoxApp {
    * A zone read off after the click of its stop: the stop is done (a stop
    * given up too). Messages of another thermostat never end a stop.
    */
-  seeOff() {
+  seeOff(final) {
     const serial = valueOf(this.model.system.serial) ?? this.session.serial ?? this.memory.serial;
     for (const [z, p] of Object.entries(this.memory.pendingStops)) {
       const zone = Number(z);
       if (p.serial !== serial || (p.verify && this.session.serial !== p.serial)) continue;
       const mode = this.model.zones.get(zone)?.period.systemMode;
-      if (mode?.value === SYSTEM_MODES.OFF && mode.seq > p.clickSeq) {
+      // Message by message only for a stop accepted (its off may be followed
+      // by a start at the thermostat, never fought), on a message after its
+      // send; otherwise only the last mode of the answer counts (a message
+      // queued before the click may show an off that no longer holds).
+      const ends =
+        mode?.value === SYSTEM_MODES.OFF &&
+        (final ? mode.seq > p.clickSeq : p.state === 'awaiting' && mode.seq > p.sentSeq);
+      if (ends) {
         this.logger.info(`Lennox: zone ${zone + 1} reads off`);
         this.stopDone(zone);
       }
@@ -1059,6 +1080,10 @@ export class LennoxApp {
     if (groups.verify.length > 0) parts.push(T.verifyStop(groups.verify.join(', ')));
     for (const [z, g] of Object.entries(this.memory.stopGivenUp)) {
       parts.push(T.stopGivenUp(this.zoneName(Number(z)), g.status));
+    }
+    const lifted = Object.keys(this.memory.stopsLifted);
+    if (lifted.length > 0) {
+      parts.push(T.stopLifted(lifted.map((z) => this.zoneName(Number(z))).join(', ')));
     }
     const dropped = Object.keys(this.memory.stopsDropped);
     if (dropped.length > 0) {
@@ -1441,7 +1466,18 @@ export class LennoxApp {
     this.guardsDelete(zone);
     delete this.memory.stopGivenUp[zone];
     delete this.memory.stopsDropped[zone];
+    delete this.memory.stopsLifted[zone];
     const old = this.memory.pendingStops[zone];
+    // The mode of the zone at the click, from a recent read of this session
+    // (null: unknown, never taken for a change made elsewhere).
+    const read = this.model.zones.get(zone)?.period.systemMode;
+    const from =
+      read &&
+      read.value !== SYSTEM_MODES.OFF &&
+      this.freshField(read) &&
+      this.reader.online === true
+        ? read.value
+        : (old?.from ?? null);
     this.memory.pendingStops[zone] = {
       serial,
       at: mono,
@@ -1453,6 +1489,7 @@ export class LennoxApp {
       sentSeq: this.model.seq,
       clickSeq: this.model.seq,
       clicked: received,
+      from,
       // A stop that still waits for the serial of a new address keeps waiting for it.
       ...(old?.verify && old.serial === serial ? { verify: true } : {}),
     };
@@ -1513,12 +1550,13 @@ export class LennoxApp {
     });
   }
 
-  /** The stop of a zone is done: kept no more, its waiters answered. */
+  /** The stop of a zone is done: kept no more, its waiters answered, the status said at once. */
   stopDone(zone) {
     delete this.memory.pendingStops[zone];
     delete this.memory.stopGivenUp[zone];
     this.badge = undefined;
     this.saveLater();
+    this.publishAll().catch(() => {});
     for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) waiter.resolve('applied');
   }
 
@@ -1598,6 +1636,7 @@ export class LennoxApp {
     const by = clickBy ?? mono + 3 * TIMINGS.readTimeout;
     const answerBy = (clickBy ?? by) + (TIMINGS.commandAnswerBy - TIMINGS.commandSendBy);
     for (const zone of zones) delete this.memory.pendingStops[zone].clicked;
+    let reconnected = false;
     for (;;) {
       let sent = false;
       let holder;
@@ -1680,6 +1719,24 @@ export class LennoxApp {
           holder = undefined;
           await sleep(this.timers, TIMINGS.stopRetryGap);
           continue;
+        }
+        if (
+          err.kind === ERROR_KINDS.REJECTED &&
+          typeof err.status === 'number' &&
+          !reconnected &&
+          this.mono() + TIMINGS.commandMinSend < Math.max(by, answerBy)
+        ) {
+          // An HTTP 4xx: the queue of our id may be gone (the thermostat
+          // restarted): a new session (Connect), then the stop again, before
+          // a refusal is counted.
+          reconnected = true;
+          this.session.connected = false;
+          holder?.release();
+          holder = undefined;
+          continue;
+        }
+        if (err.kind === ERROR_KINDS.REJECTED && typeof err.status === 'number') {
+          this.session.connected = false;
         }
         this.stopsFailed(zones, err, sent);
         return;
@@ -1772,15 +1829,23 @@ export class LennoxApp {
       if (!serial || p.serial !== serial || p.state !== 'awaiting') continue;
       const mode = this.model.zones.get(zone)?.period.systemMode;
       if (!mode || mode.value === SYSTEM_MODES.OFF) continue;
-      if (p.restored) {
-        if (p.onRead === undefined) {
+      if (p.restored && p.from && mode.value !== p.from) {
+        // Accepted before a restart, the zone now runs in ANOTHER mode than at
+        // the click: changed at the thermostat. Lifted once read so twice, an
+        // interval apart at least, and said; the same mode (or one unknown)
+        // never lifts it: in doubt, the stop goes (below).
+        if (p.onAt === undefined || p.onMode !== mode.value) {
+          p.onAt = mono;
+          p.onMode = mode.value;
           p.onRead = this.reads;
           changed = true;
-        } else if (this.reads > p.onRead) {
+        } else if (this.reads > p.onRead && mono - p.onAt >= this.interval) {
           delete this.memory.pendingStops[zone];
+          this.memory.stopsLifted[zone] = true;
           changed = true;
+          this.badge = undefined;
           this.logger.warn(
-            `Lennox: zone ${zone + 1} read running twice after a restart: off accepted before it, changed at the thermostat since, not sent again`,
+            `Lennox: zone ${zone + 1} read in another mode twice after a restart: changed at the thermostat, off not sent again`,
           );
           for (const waiter of [...(this.stopWaiters.get(zone) ?? [])]) {
             waiter.resolve(ERRORS.stopEnded);
@@ -1848,7 +1913,8 @@ export class LennoxApp {
     const waiting = Object.values(this.memory.pendingStops).some((p) => p.state === 'awaiting');
     if (!waiting || !this.address() || this.busy) return;
     const by = this.mono() + 2 * TIMINGS.readTimeout;
-    const holder = await this.take(KIND.STOP, by);
+    // Its own kind: a stop clicked or kept, and a command, take the link from it.
+    const holder = await this.take(KIND.CHECK, by);
     try {
       if (!this.session.connected) await this.connectSession(holder, by, true);
       // Everything asked again: the queue sends changes only, and a stop
@@ -1860,7 +1926,7 @@ export class LennoxApp {
         by,
         protective: true,
       });
-      checkAccepted(answer);
+      this.acceptedOrNewSession(answer);
       this.session.subscribedAt = this.mono();
       await this.drain(holder, by);
     } finally {
@@ -2141,6 +2207,7 @@ export class LennoxApp {
           );
         } else if (err.kind === ERROR_KINDS.REJECTED) {
           delete this.memory.guards[e.zone];
+          if (typeof err.status === 'number') this.session.connected = false;
           e.reject(this.refusal(ERRORS.refused(reasonOf(err))));
         } else {
           e.reject(this.refusal(ERRORS.sentUnconfirmed));
@@ -2152,6 +2219,17 @@ export class LennoxApp {
       ) {
         this.pauseFor(err);
       }
+      // A newer mode that left without a refusal (a silence, a cut, a 5xx)
+      // ends the stop kept before it, as an accepted one (the fiche: only a
+      // 4xx, a 429 or a command never sent leave the stop).
+      const left = live.filter(
+        (e) =>
+          e.sentAt !== undefined &&
+          !notSent(err) &&
+          err.kind !== ERROR_KINDS.REJECTED &&
+          err.kind !== ERROR_KINDS.RATE_LIMITED,
+      );
+      if (left.length > 0) this.modesAccepted(left);
       if (live.some((e) => e.sentAt !== undefined)) this.followUp();
       this.saveLater();
     } finally {
@@ -2257,7 +2335,7 @@ export class LennoxApp {
 /** A short reason of a failure, without any byte of an answer. */
 export function reasonOf(err) {
   if (!err) return 'error';
-  if (err.refusal) return 'refused';
+  if (err.refusal) return 'link busy';
   switch (err.kind) {
     case ERROR_KINDS.UNREACHABLE:
       return 'unreachable';

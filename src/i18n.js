@@ -149,6 +149,11 @@ export const T = {
       `Off of zone ${zone} refused by the thermostat (${status}): sent again in 5 minutes, given up after 3 refusals in a row.`,
       `Arrêt de la zone ${zone} refusé par le thermostat (${status}) : renvoyé dans 5 minutes, abandonné après 3 refus de suite.`,
     ),
+  stopLifted: (zones) =>
+    both(
+      `Off of zone ${zones} ended: accepted before a restart of the module, the zone was then read twice in another mode than at the click (changed at the thermostat).`,
+      `Arrêt de la zone ${zones} terminé : accepté avant un redémarrage du module, la zone a ensuite été lue deux fois dans un autre mode qu'au clic (changé au thermostat).`,
+    ),
   stopDropped: (zones) =>
     both(
       `Off of zone ${zones} dropped: another thermostat answers at the address.`,

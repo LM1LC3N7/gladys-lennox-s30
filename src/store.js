@@ -99,6 +99,8 @@ export const emptyMemory = () => ({
   stopGivenUp: {},
   /** zone -> true: a stop dropped because another thermostat answers (said until a click; memory only). */
   stopsDropped: {},
+  /** zone -> true: a stop accepted before a restart, lifted for a change at the thermostat (said until a click; memory only). */
+  stopsLifted: {},
   /** zone -> { expect, until, sentSeq } */
   guards: {},
 });
@@ -123,6 +125,7 @@ export function toDisk(memory, { mono, now }) {
       notBefore: wall(p.notBefore),
       sentAt: wall(p.sentAt),
       ...(p.verify ? { verify: true } : {}),
+      from: p.from ?? null,
     })),
     stopGivenUp: Object.fromEntries(
       Object.entries(memory.stopGivenUp).map(([z, g]) => [
@@ -190,6 +193,15 @@ export function fromDisk(raw, { mono, now }) {
       ...(p.state === 'awaiting' ? { restored: true } : {}),
       // Kept from another address: sent once the address shows its serial.
       ...(p.verify === true ? { verify: true } : {}),
+      /** The mode of the zone at the click (null: unknown, never "changed elsewhere"). */
+      from: [
+        SYSTEM_MODES.HEAT,
+        SYSTEM_MODES.COOL,
+        SYSTEM_MODES.AUTO,
+        SYSTEM_MODES.EMERGENCY,
+      ].includes(p.from)
+        ? p.from
+        : null,
     };
   }
   for (const [z, g] of Object.entries(plain(data.stopGivenUp) ? data.stopGivenUp : {})) {

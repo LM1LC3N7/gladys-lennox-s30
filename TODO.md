@@ -92,10 +92,15 @@ up to date at the end of every milestone.
   of its own, pause or not: RequestData (everything sent again) 6 s after,
   then every 30 s while it waits; a zone still running 5 s or more after the
   send means it was not applied: sent again (3 accepted sends at most).
-- **Off accepted before a restart** (review r1, I1): what the thermostat
-  showed between the send and the restart is unknown; two reads in a row
-  after the restart showing the zone running end it (a start at the
-  thermostat is not fought), logged. To confirm with Louis.
+- **Off accepted before a restart** (reviews r1 I1, r2 B4): the mode of the
+  zone at the click is kept in /data; after a restart, the Off is lifted only
+  when two reads, an interval apart, show ANOTHER mode (said in the status);
+  the same mode or an unknown one sends it again (in doubt, the Off goes, a
+  start at the thermostat in that same mode during the restart included).
+- **Newer mode** (r2 m13, the fiche): a mode that left without a refusal
+  (4xx, code other than 1, 429) ends the Off kept before it, a silence too.
+- **4xx of Connect, RequestData or Publish** (r2 B5): a new session; for an
+  Off, a new session and the Off again before a refusal counts.
 - **New address**: the stops kept follow the serial; sent once the new
   address shows it, dropped and said when it shows another one.
 - **Every value written back is bounded** (review r1, I4): the other

@@ -48,19 +48,15 @@ It is **refused** only:
 
 Until the thermostat reads off, the Off is **kept in `/data`**, with no time limit:
 
-- not sent yet (thermostat unreachable, certificate changed, pause asked): sent again every 30 seconds and at a
-  restart; this does not count as a try;
-- refused by the thermostat (a 4xx, an answer other than "code 1"): sent again 5 minutes later, given up after
+- not sent yet (thermostat unreachable, certificate changed): sent again every 30 seconds and at a restart; after a 429 or a 5xx answered to the Off, after the `Retry-After` asked (5 minutes at most); this does not count as a try;
+- refused by the thermostat (a 4xx, an answer other than "code 1"): after a 4xx, a new session and the Off again at once; then sent again 5 minutes later, given up after
   three refusals in a row;
 - accepted: read again 6 seconds later then every 30 seconds, pause or not, and sent again when a read shows the
   zone running 5 seconds or more after the send; given up after three accepted sends never read off.
 
 It ends when a read shows the zone off after the click (even when the zone is started again at the thermostat
 right after: a start at the thermostat or in the Lennox app is not fought), when another mode of the zone,
-clicked after it in Gladys (with the option), is **accepted** by the thermostat (a refused mode leaves the Off
-kept), or when another thermostat answers at the address (said in the status). An Off accepted before a restart
-of the module ends when two reads in a row after the restart show the zone running (changed at the thermostat
-meanwhile). A new address saved keeps the Offs: they are sent once the new address shows the serial number of
+clicked after it in Gladys (with the option), left without being refused (a mode refused by a 4xx, an answer other than "code 1" or a 429, or never sent, leaves the Off kept), or when another thermostat answers at the address (said in the status). An Off accepted before a restart of the module ends only when two reads, an interval apart at least, show the zone in **another** mode than before the click (changed at the thermostat), which the status says; in the same mode as at the click, or when that mode was not known, it is sent again (in doubt, the Off goes), even when the zone was started again at the thermostat in that mode during the restart. A new address saved keeps the Offs: they are sent once the new address shows the serial number of
 the same thermostat. A give-up is said in the status, the badge of the device and the answer, until a read shows
 the zone off or a new click. In away mode, the Off targets the manual schedule as lennoxs30api does, while the
 thermostat follows the away schedule: it may be given up after three sends (not checked on a real thermostat).

@@ -50,9 +50,8 @@ Il est **refusé** seulement :
 
 Tant que le thermostat n'est pas lu à l'arrêt, l'arrêt est **gardé dans `/data`**, sans limite de durée :
 
-- pas encore parti (thermostat injoignable, certificat changé, pause demandée) : renvoyé toutes les 30 secondes
-  et au redémarrage ; cela ne compte pas comme un essai ;
-- refusé par le thermostat (un 4xx, une réponse autre que « code 1 ») : renvoyé 5 minutes plus tard, abandonné
+- pas encore parti (thermostat injoignable, certificat changé) : renvoyé toutes les 30 secondes et au redémarrage ; après un 429 ou un 5xx répondu à l'arrêt, après le `Retry-After` demandé (5 minutes au plus) ; cela ne compte pas comme un essai ;
+- refusé par le thermostat (un 4xx, une réponse autre que « code 1 ») : après un 4xx, une nouvelle session et un renvoi aussitôt ; puis renvoyé 5 minutes plus tard, abandonné
   après trois refus de suite ;
 - accepté : relu 6 secondes après puis toutes les 30 secondes, pause ou non, et renvoyé si une lecture montre
   la zone en marche 5 secondes ou plus après l'envoi ; abandonné après trois envois acceptés jamais lus à
@@ -60,10 +59,7 @@ Tant que le thermostat n'est pas lu à l'arrêt, l'arrêt est **gardé dans `/da
 
 Il prend fin quand une lecture montre la zone à l'arrêt après le clic (même si la zone est relancée au
 thermostat juste après : une relance au thermostat ou dans l'application Lennox n'est pas combattue), quand un
-autre mode de la zone, cliqué après lui depuis Gladys (avec l'option), est **accepté** par le thermostat (un
-mode refusé laisse l'arrêt gardé), ou si un autre thermostat répond à l'adresse (dit dans l'état). Un arrêt
-accepté avant un redémarrage du module est terminé si deux lectures de suite après le redémarrage montrent la
-zone en marche (changée au thermostat entre-temps). Une nouvelle adresse saisie garde les arrêts : ils partent
+autre mode de la zone, cliqué après lui depuis Gladys (avec l'option), est parti sans être refusé (un mode refusé par un 4xx, une autre réponse que « code 1 » ou un 429, ou jamais parti, laisse l'arrêt gardé), ou si un autre thermostat répond à l'adresse (dit dans l'état). Un arrêt accepté avant un redémarrage du module n'est terminé que si deux lectures, à au moins un intervalle d'écart, montrent la zone dans un **autre** mode que celui d'avant le clic (changé au thermostat), ce que l'état dit ; dans le même mode qu'au clic, ou si ce mode n'était pas connu, il est renvoyé (dans le doute, l'arrêt part), même si la zone a été relancée au thermostat dans ce mode pendant le redémarrage. Une nouvelle adresse saisie garde les arrêts : ils partent
 dès que la nouvelle adresse montre le numéro de série du même thermostat. Un abandon est dit dans l'état, le
 badge de l'appareil et la réponse, jusqu'à une lecture de la zone à l'arrêt ou un nouveau clic. En mode
 absence, l'arrêt vise le programme manuel comme lennoxs30api, alors que le thermostat suit le programme
